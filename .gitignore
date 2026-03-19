@@ -1,8 +1,7 @@
 *.zip
 *.csv
 
-data/datasets_JAX/*
-data/datasets_NYC/*
+data
 results_eval/data_eval_JAX/*
 results_eval/data_eval_NYC/*
 

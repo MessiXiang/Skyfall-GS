@@ -251,6 +251,10 @@ class OptimizationParams(ParamGroup):
         # IDU rendering
         self.idu_position_lr_max_steps: int = self.idu_episode_iterations
         self.idu_render_size: int = 1024
+
+        # IDU pseudo-depth backend
+        self.idu_depth_estimator: str = "moge"  # [moge, vggt]
+        self.idu_vggt_model_name: str = "facebook/VGGT-1B"
         
         # Look-at point grid
         self.idu_grid_width: int = 256

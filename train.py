@@ -32,7 +32,7 @@ from utils.camera_utils import gen_idu_orbit_camera, cameraList_from_camInfos
 from scene.dataset_readers import CameraInfo
 
 from PIL import Image
-from submodules.MoGe.idu_depth import MoGeIDU
+from utils.idu_depth_utils import build_depth_estimator
 
 # pip install diffusers==0.30.1 huggingface-hub==0.33.4 transformers==4.46.3 tokenizers==0.20.3 (default)
 from submodules.FlowEdit.idu_refine import FlowEditRefineIDU 
@@ -55,11 +55,6 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 os.makedirs("./depth_tmp", exist_ok=True)
-moge_standalone = MoGeIDU(
-    "./depth_tmp",
-    "cuda:0",
-    60.0
-)
 
 @torch.no_grad()
 def create_offset_gt(image, offset):
@@ -120,6 +115,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     allCameras = trainCameras + testCameras
 
     num_train_cams = len(trainCameras)
+
+    depth_estimator_standalone = build_depth_estimator(
+        opt.idu_depth_estimator,
+        "./depth_tmp",
+        "cuda:0",
+        60.0,
+        vggt_model_name=opt.idu_vggt_model_name,
+    )
     
     # highresolution index
     highresolution_index = []
@@ -264,8 +267,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             render_image, render_depth = render_pkg["render"], render_pkg["render_depth"]
             
             render_image_pil = to_pil_image(render_image)
-            moge_depth = moge_standalone.run([render_image_pil], pbar=False)[0]
-            gt_depth = torch.tensor(moge_depth).to(render_depth.device)
+            pseudo_depth = depth_estimator_standalone.run([render_image_pil], pbar=False)[0]
+            gt_depth = torch.tensor(pseudo_depth).to(render_depth.device)
 
             gt_depth = gt_depth.reshape(-1, 1)
             render_depth = render_depth.reshape(-1, 1)
@@ -323,9 +326,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-                    opt.lambda_opacity = 0.01
-                    opacity_cooldown_iter = 500
-                    print(f"Turn off opacity regularization for {opacity_cooldown_iter} iterations")
+                    
+                    if origin_lambda_opacity > 0:
+                        opt.lambda_opacity = 0.01
+                        opacity_cooldown_iter = 500
+                        print(f"Turn off opacity regularization for {opacity_cooldown_iter} iterations")
 
 
 
@@ -366,6 +371,7 @@ def generate_idu_training_set(
     use_flow_edit: bool=False, flow_edit_n_min: int=0, flow_edit_n_max: int=15, flow_edit_n_max_end: int=15, flow_edit_n_avg: int=1, model_type: str="FLUX",
     use_difix3d: bool=False, difix3d_model: str="nvidia/difix", difix3d_steps: int=1, 
     use_dreamscene: bool=False, use_sd21: bool=True,
+    depth_estimator_name: str="moge", vggt_model_name: str="facebook/VGGT-1B",
     difix3d_guidance: float=0.0, difix3d_timesteps: list=None, difix3d_use_reference: bool=False,
     difix3d_prompt: str="remove degradation",
     refine=True, idu_no_curriculum=False, idu_random_ap=False
@@ -373,7 +379,7 @@ def generate_idu_training_set(
 
     gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
     print(f"Loading model from checkpoint {checkpoint_path}")
-    (model_params, first_iter) = torch.load(checkpoint_path)
+    (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
     gaussians.load_from_checkpoints(model_params)
     base_dir = os.path.dirname(checkpoint_path)
     print(base_dir)
@@ -494,12 +500,14 @@ def generate_idu_training_set(
 
     depth_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "render_depth")
     os.makedirs(depth_path, exist_ok=True)
-    moge = MoGeIDU(
+    depth_estimator = build_depth_estimator(
+        depth_estimator_name,
         depth_path,
-        device = "cuda:0",
-        fov_x=fov_x
+        device="cuda:0",
+        fov_x=fov_x,
+        vggt_model_name=vggt_model_name,
     )
-    depths = moge.run(final_imgs)
+    depths = depth_estimator.run(final_imgs)
 
 
     final_idu_cam_infos = []
@@ -518,7 +526,7 @@ def generate_idu_training_set(
 
     final_cam_lists = cameraList_from_camInfos(final_idu_cam_infos, 1, dataset, is_idu=True, is_pseudo_cam=idu_random_ap)
         
-    del moge
+    del depth_estimator
     del gaussians
     torch.cuda.empty_cache()
 
@@ -616,6 +624,7 @@ def training_idu_episode(
         difix3d_guidance=opt.idu_difix3d_guidance, difix3d_timesteps=opt.idu_difix3d_timesteps, 
         difix3d_use_reference=opt.idu_difix3d_use_reference, difix3d_prompt=opt.idu_difix3d_prompt,
         use_dreamscene=opt.idu_use_dreamscene, use_sd21=opt.idu_use_sd21,
+        depth_estimator_name=opt.idu_depth_estimator, vggt_model_name=opt.idu_vggt_model_name,
         refine=opt.idu_refine, idu_no_curriculum=opt.idu_no_curriculum, idu_random_ap=opt.idu_random_ap
     )
 
@@ -661,6 +670,14 @@ def training_idu_episode(
     allCameras = trainCameras + trainIDUCameras + testCameras
 
     num_train_cams = len(trainCameras)
+
+    depth_estimator_standalone = build_depth_estimator(
+        opt.idu_depth_estimator,
+        "./depth_tmp",
+        "cuda:0",
+        fov,
+        vggt_model_name=opt.idu_vggt_model_name,
+    )
     
     # highresolution index
     highresolution_index = []
@@ -819,8 +836,8 @@ def training_idu_episode(
             render_image, render_depth = render_pkg["render"], render_pkg["render_depth"]
             
             render_image_pil = to_pil_image(render_image)
-            moge_depth = moge_standalone.run([render_image_pil], pbar=False)[0]
-            gt_depth = torch.tensor(moge_depth).to(render_depth.device)
+            pseudo_depth = depth_estimator_standalone.run([render_image_pil], pbar=False)[0]
+            gt_depth = torch.tensor(pseudo_depth).to(render_depth.device)
 
             gt_depth = gt_depth.reshape(-1, 1)
             render_depth = render_depth.reshape(-1, 1)

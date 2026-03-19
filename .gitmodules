@@ -13,3 +13,6 @@
 [submodule "submodules/simple-knn"]
 	path = submodules/simple-knn
 	url = https://github.com/camenduru/simple-knn.git
+[submodule "submodules/vggt"]
+	path = submodules/vggt
+	url = https://github.com/facebookresearch/vggt.git

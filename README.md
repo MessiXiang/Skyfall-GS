@@ -66,9 +66,9 @@
 
     pip install --force-reinstall torch torchvision torchaudio
 
-    pip install submodules/diff-gaussian-rasterization-depth
-    pip install submodules/simple-knn
-    pip install submodules/fused-ssim
+    pip install --no-build-isolation submodules/diff-gaussian-rasterization-depth
+    pip install --no-build-isolation submodules/simple-knn
+    pip install --no-build-isolation submodules/fused-ssim
     ```
 
 ## Dataset
@@ -170,7 +170,7 @@ This stage refines the geometry and synthesizes high-quality textures using an i
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068 \
+    -m ./outputs/JAX_idu/JAX_068_vggt \
     --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
@@ -197,9 +197,15 @@ python train.py \
     --idu_iter_full_train 0 \
     --idu_opacity_cooling_iterations 500 \
     --lambda_pseudo_depth 0.5 \
+    --idu_depth_estimator vggt \
+    --idu_vggt_model_name facebook/VGGT-1B \
     --idu_densify_until_iter 9000 \
     --idu_train_ratio 0.75
 ```
+
+> If you use VGGT for pseudo depth in Stage 2, make sure VGGT dependencies are installed:
+>
+> `pip install -r submodules/vggt/requirements.txt`
 
 ## Automated Training Scripts
 
