@@ -23,7 +23,7 @@ from utils.general_utils import safe_state
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from utils.camera_utils import cameraList_from_camInfos
 from argparse import ArgumentParser
-from gaussian_renderer import GaussianModel
+from scene import create_gaussian_model, detect_gaussian_backend_from_ply
 
 from typing import Any, Dict, Optional, Tuple, List
 from scene.dataset_readers import CameraInfo
@@ -189,7 +189,7 @@ def detect_sh_degree_from_ply(ply_path: str) -> int:
     return sh_degree
 
 def load_ply_gaussians(ply_path: str, sh_degree: int = None, appearance_enabled: bool = False,
-                      appearance_n_fourier_freqs: int = 4, appearance_embedding_dim: int = 32) -> GaussianModel:
+                      appearance_n_fourier_freqs: int = 4, appearance_embedding_dim: int = 32) -> object:
     """Load Gaussians from a PLY file.
 
     Args:
@@ -200,7 +200,7 @@ def load_ply_gaussians(ply_path: str, sh_degree: int = None, appearance_enabled:
         appearance_embedding_dim: Appearance embedding dimension
 
     Returns:
-        GaussianModel: Loaded Gaussian model
+        Loaded Gaussian model instance
     """
     from plyfile import PlyData
 
@@ -213,7 +213,14 @@ def load_ply_gaussians(ply_path: str, sh_degree: int = None, appearance_enabled:
     field_names = [p.name for p in plydata.elements[0].properties]
     has_filter_3d = 'filter_3D' in field_names
 
-    gaussians = GaussianModel(sh_degree, appearance_enabled, appearance_n_fourier_freqs, appearance_embedding_dim)
+    backend = detect_gaussian_backend_from_ply(ply_path)
+    gaussians = create_gaussian_model(
+        backend,
+        sh_degree,
+        appearance_enabled,
+        appearance_n_fourier_freqs,
+        appearance_embedding_dim,
+    )
 
     if has_filter_3d:
         # Use the original Mip-Splatting load_ply method
@@ -226,7 +233,7 @@ def load_ply_gaussians(ply_path: str, sh_degree: int = None, appearance_enabled:
 
     return gaussians
 
-def load_standard_ply(gaussians: GaussianModel, path: str):
+def load_standard_ply(gaussians: object, path: str):
     """Load standard 3D Gaussian Splatting PLY file without filter_3D field."""
     from plyfile import PlyData
     import numpy as np
@@ -256,7 +263,11 @@ def load_standard_ply(gaussians: GaussianModel, path: str):
 
     scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
     scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
-    scales = np.zeros((xyz.shape[0], len(scale_names)))
+    if getattr(gaussians, "gs_backend", "3dgs") == "2dgs":
+        scales = np.zeros((xyz.shape[0], min(2, len(scale_names))))
+        scale_names = scale_names[:2]
+    else:
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
     for idx, attr_name in enumerate(scale_names):
         scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
@@ -308,6 +319,7 @@ class PipelineParams:
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        self.depth_ratio = 0.0
 
 class MinimalArgs:
     """Minimal args object for camera loading."""

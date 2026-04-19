@@ -26,7 +26,7 @@ from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 from utils.camera_utils import cameraList_from_camInfos
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
+from scene import create_gaussian_model_from_dataset
 
 from typing import Any, Dict, Optional, Tuple, List
 from scene.dataset_readers import CameraInfo
@@ -189,11 +189,11 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     if iteration == -1:
         iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
+        gaussians = create_gaussian_model_from_dataset(dataset)
         if load_from_checkpoints:
             checkpoint_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
             print(f"Loading model from checkpoint {checkpoint_path}")
-            (model_params, first_iter) = torch.load(checkpoint_path)
+            (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
             gaussians.load_from_checkpoints(model_params)
         
         print(gaussians._xyz.shape)

@@ -116,6 +116,7 @@ class ModelParams(ParamGroup):
         self.resample_gt_image: bool = False
         self.load_allres: bool = False
         self.sample_more_highres: bool = False
+        self.gs_backend: str = "3dgs"
         
         super().__init__(parser, "Loading Parameters", sentinel)
     
@@ -133,6 +134,7 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python: bool = False
         self.compute_cov3D_python: bool = False
         self.debug: bool = False
+        self.depth_ratio: float = 0.0
         
         super().__init__(parser, "Pipeline Parameters")
 
@@ -172,6 +174,8 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim: float = 0.2
         self.lambda_depth: float = 0.5
         self.lambda_opacity: float = 0.1  # Entropy-based opacity regularization
+        self.lambda_distortion: float = 0.0
+        self.lambda_normal: float = 0.0
         
         # Appearance modeling learning rates
         self.embedding_lr: float = 0.005

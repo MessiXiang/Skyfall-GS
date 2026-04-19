@@ -14,13 +14,17 @@ import random
 import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import GaussianModel as GaussianModel3D
+from scene.gaussian_model_2d import GaussianModel2D
+from scene.gaussian_model_factory import create_gaussian_model, create_gaussian_model_from_dataset, detect_gaussian_backend_from_ply, normalize_gaussian_backend
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+GaussianModel = GaussianModel3D
+
 class Scene:
 
-    gaussians : GaussianModel
+    gaussians : GaussianModel3D
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=False, ply_path=None, resolution_scales=[1.0]):
         """b

@@ -20,7 +20,7 @@ from utils.loss_utils import l1_loss, ssim
 from torchmetrics.functional.regression import pearson_corrcoef
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene, GaussianModel
+from scene import Scene, create_gaussian_model_from_dataset
 from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
@@ -76,6 +76,33 @@ def create_offset_gt(image, offset):
     image = torch.nn.functional.grid_sample(image[None], id_coords[None], align_corners=True, padding_mode="border")[0]
     return image
 
+
+def add_optional_loss(total_loss, weight, loss_term):
+    if weight <= 0 or isinstance(loss_term, float):
+        return total_loss
+    scaled_loss = weight * loss_term
+    if total_loss is None:
+        return scaled_loss
+    return total_loss + scaled_loss
+
+
+def compute_surface_regularization_losses(render_pkg, opt):
+    distortion_loss = 0.0
+    normal_loss = 0.0
+
+    if opt.lambda_distortion > 0 and "render_dist" in render_pkg:
+        distortion_loss = render_pkg["render_dist"].mean()
+
+    required_keys = {"render_norm", "surf_normal", "render_alpha"}
+    if opt.lambda_normal > 0 and required_keys.issubset(render_pkg.keys()):
+        render_normal = torch.nn.functional.normalize(render_pkg["render_norm"], dim=0)
+        surf_normal = torch.nn.functional.normalize(render_pkg["surf_normal"], dim=0)
+        normal_mask = (render_pkg["render_alpha"] > 0.25).detach().float()
+        cosine = torch.clamp((render_normal * surf_normal).sum(dim=0, keepdim=True).abs(), max=1.0)
+        normal_loss = ((1.0 - cosine) * normal_mask).sum() / normal_mask.sum().clamp_min(1.0)
+
+    return distortion_loss, normal_loss
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     if opt.use_lpips_loss:
         lpips_loss_fn = lpips.LPIPS(net=opt.lpips_net)
@@ -85,18 +112,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         print("Initialized LPIPS loss")
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(
-        dataset.sh_degree,
-        dataset.appearance_enabled,
-        dataset.appearance_n_fourier_freqs,
-        dataset.appearance_embedding_dim
-    )
+    gaussians = create_gaussian_model_from_dataset(dataset)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt, num_train_cameras=len(scene.getTrainCameras()))
     if checkpoint:
         print("Restoring model from checkpoint")
         # original implementation
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
         # set correct xyz lr scheduler
         opt.position_lr_max_steps = opt.iterations
@@ -221,6 +243,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        distortion_loss, normal_loss = compute_surface_regularization_losses(render_pkg, opt)
+        loss = add_optional_loss(loss, opt.lambda_distortion, distortion_loss)
+        loss = add_optional_loss(loss, opt.lambda_normal, normal_loss)
 
         depth_loss = 0.0
         if opt.lambda_depth > 0:
@@ -371,9 +397,9 @@ def generate_idu_training_set(
     refine=True, idu_no_curriculum=False, idu_random_ap=False
 ):
 
-    gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
+    gaussians = create_gaussian_model_from_dataset(dataset)
     print(f"Loading model from checkpoint {checkpoint_path}")
-    (model_params, first_iter) = torch.load(checkpoint_path)
+    (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
     gaussians.load_from_checkpoints(model_params)
     base_dir = os.path.dirname(checkpoint_path)
     print(base_dir)
@@ -621,12 +647,7 @@ def training_idu_episode(
 
     # load Gaussians and scene
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(
-        dataset.sh_degree,
-        dataset.appearance_enabled,
-        dataset.appearance_n_fourier_freqs,
-        dataset.appearance_embedding_dim
-    )
+    gaussians = create_gaussian_model_from_dataset(dataset)
     scene = Scene(dataset, gaussians)
     # set IDU cameras
     scene.train_idu_cameras[1.0] = idu_cam_list
@@ -639,7 +660,7 @@ def training_idu_episode(
     if checkpoint_path:
         print(f"Restoring model from checkpoint {checkpoint_path}")
         # original implementation
-        (model_params, first_iter) = torch.load(checkpoint_path)
+        (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
         gaussians.restore(model_params, opt, iterative_datasets_update=True)
         print("Restored model from checkpoint at iteration {}".format(first_iter))
         opt.iterations = first_iter + opt.idu_episode_iterations  # TODO: make this a parameter
@@ -779,6 +800,10 @@ def training_idu_episode(
                 loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
         else:
             Ll1 = torch.tensor(0.0)
+
+        distortion_loss, normal_loss = compute_surface_regularization_losses(render_pkg, opt)
+        loss = add_optional_loss(loss, opt.lambda_distortion, distortion_loss)
+        loss = add_optional_loss(loss, opt.lambda_normal, normal_loss)
 
 
         depth_loss = 0.0

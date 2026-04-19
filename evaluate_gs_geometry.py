@@ -21,8 +21,8 @@ import matplotlib.colors as colors
 
 
 # Import Gaussian Splatting components
-from scene import Scene
-from gaussian_renderer import render, GaussianModel
+from scene import Scene, create_gaussian_model_from_dataset
+from gaussian_renderer import render
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from utils.system_utils import searchForMaxIteration
@@ -640,14 +640,14 @@ def evaluate_scene(dataset, pipeline, scene_name, satellite_data_path, gt_data_p
     
     # Load Gaussian model
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
+        gaussians = create_gaussian_model_from_dataset(dataset)
     
         # Load from checkpoint if specified
         if load_from_checkpoints:
             checkpoint_path = os.path.join(dataset.model_path, f"chkpnt{iteration}.pth")
             print(f"Loading model from checkpoint {checkpoint_path}")
             if os.path.exists(checkpoint_path):
-                (model_params, first_iter) = torch.load(checkpoint_path)
+                (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
                 gaussians.load_from_checkpoints(model_params)
             else:
                 print(f"Checkpoint not found: {checkpoint_path}")

@@ -3,7 +3,7 @@ import os
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from gaussian_renderer import GaussianModel
+from scene import create_gaussian_model_from_dataset
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -20,11 +20,11 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     dataset = model.extract(args)
-    gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
+    gaussians = create_gaussian_model_from_dataset(dataset)
     if args.load_from_checkpoints:
         checkpoint_path = os.path.join(dataset.model_path, f"chkpnt{args.iteration}.pth")
         print(f"Loading model from checkpoint {checkpoint_path}")
-        (model_params, first_iter) = torch.load(checkpoint_path)
+        (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
         gaussians.load_from_checkpoints(model_params)
     gaussians.load_ply(os.path.join(dataset.model_path, "point_cloud", f"iteration_{args.iteration}", "point_cloud.ply"))
     gaussians.save_fused_ply(args.output_ply, args.load_from_checkpoints)

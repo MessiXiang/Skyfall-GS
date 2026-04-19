@@ -50,6 +50,12 @@
     cd Skyfall-GS
     ```
 
+    If you are updating an existing checkout, run:
+
+    ```bash
+    git submodule update --init --recursive
+    ```
+
 2.  **Create and activate a Conda environment:**
 
     ```bash
@@ -66,10 +72,24 @@
 
     pip install --force-reinstall torch torchvision torchaudio
 
-    pip install submodules/diff-gaussian-rasterization-depth
-    pip install submodules/simple-knn
-    pip install submodules/fused-ssim
+    pip install --no-build-isolation submodules/diff-gaussian-rasterization-depth
+    pip install --no-build-isolation submodules/diff-surfel-rasterization
+    pip install --no-build-isolation submodules/simple-knn
+    pip install --no-build-isolation submodules/fused-ssim
     ```
+
+4.  **Select the Gaussian backend at runtime:**
+
+    The repository now supports both the original 3DGS backend and a 2DGS backend.
+
+    - `--gs_backend 3dgs`: default behavior, compatible with the original pipeline.
+    - `--gs_backend 2dgs`: enables the surfel-based 2D Gaussian backend.
+
+    When using `--gs_backend 2dgs`, the following additional controls are available:
+
+    - `--lambda_distortion`: distortion regularization weight.
+    - `--lambda_normal`: normal-consistency regularization weight.
+    - `--depth_ratio`: blend ratio between expected depth and median depth during 2DGS rendering.
 
 ## Dataset
 
@@ -199,6 +219,25 @@ python train.py \
     --lambda_pseudo_depth 0.5 \
     --idu_densify_until_iter 9000 \
     --idu_train_ratio 0.75
+```
+
+### Switching to 2DGS
+
+Append `--gs_backend 2dgs` to the Stage 1 or Stage 2 command line to swap the model and renderer backend from 3DGS to 2DGS.
+
+Example Stage 1 invocation with the 2DGS backend:
+
+```bash
+python train.py \
+    -s ./data/datasets_JAX/JAX_068/ \
+    -m ./outputs/JAX/JAX_068_2dgs \
+    --gs_backend 2dgs \
+    --eval \
+    --port 6209 \
+    --kernel_size 0.1 \
+    --resolution 1 \
+    --sh_degree 1 \
+    --appearance_enabled
 ```
 
 ## Automated Training Scripts
