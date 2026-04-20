@@ -192,7 +192,7 @@ def _render_2dgs(viewpoint_camera, pc, pipe, bg_color, kernel_size, scaling_modi
     rasterizer = GaussianRasterizer2D(raster_settings=raster_settings)
 
     means3d = pc.get_xyz
-    opacity = pc.get_opacity
+    opacity = pc.get_opacity_with_3D_filter
     scales = None
     rotations = None
     cov3d_precomp = None
@@ -215,7 +215,7 @@ def _render_2dgs(viewpoint_camera, pc, pipe, bg_color, kernel_size, scaling_modi
         world2pix = viewpoint_camera.full_proj_transform @ ndc2pix
         cov3d_precomp = (splat2world[:, [0, 1, 3]] @ world2pix[:, [0, 1, 3]]).permute(0, 2, 1).reshape(-1, 9)
     else:
-        scales = pc.get_scaling
+        scales = pc.get_scaling_with_3D_filter
         rotations = pc.get_rotation
 
     shs, colors_precomp = _prepare_colors(viewpoint_camera, pc, pipe, override_color, testing, appearance_embedding)

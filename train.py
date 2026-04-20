@@ -55,11 +55,19 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 os.makedirs("./depth_tmp", exist_ok=True)
-moge_standalone = MoGeIDU(
-    "./depth_tmp",
-    "cuda:0",
-    60.0
-)
+_moge_standalone = None
+_moge_standalone_device = None
+
+def get_moge_standalone(device="cuda:0"):
+    """Lazy-load MoGeIDU singleton on the specified device."""
+    global _moge_standalone, _moge_standalone_device
+    if _moge_standalone is None or _moge_standalone_device != device:
+        if _moge_standalone is not None:
+            del _moge_standalone
+            torch.cuda.empty_cache()
+        _moge_standalone = MoGeIDU("./depth_tmp", device, 60.0)
+        _moge_standalone_device = device
+    return _moge_standalone
 
 @torch.no_grad()
 def create_offset_gt(image, offset):
@@ -260,7 +268,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss += opt.lambda_depth * depth_loss
         
         opacity_loss = 0.0
-        if opt.lambda_opacity > 0:
+        if opt.lambda_opacity > 0 and gaussians.get_opacity.numel() > 0:
             # Get each gaussians' opacity and use cross entropy loss
             opacity = gaussians.get_opacity.clamp(1.0e-3, 1.0 - 1.0e-3)
             opacity_loss = torch.nn.functional.binary_cross_entropy(opacity, opacity)
@@ -288,14 +296,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 subpixel_offset=subpixel_offset
             )
             render_image, render_depth = render_pkg["render"], render_pkg["render_depth"]
+            render_alpha = render_pkg.get("render_alpha", None)
             
             render_image_pil = to_pil_image(render_image)
-            moge_depth = moge_standalone.run([render_image_pil], pbar=False)[0]
+            moge_depth = get_moge_standalone(device=opt.idu_depth_device).run([render_image_pil], pbar=False)[0]
             gt_depth = torch.tensor(moge_depth).to(render_depth.device)
 
             gt_depth = gt_depth.reshape(-1, 1)
             render_depth = render_depth.reshape(-1, 1)
-            depth_loss_pseudo = depth_loss_func(gt_depth, render_depth)
+
+            # Filter out invalid regions (low alpha) to avoid NaN in Pearson correlation
+            if render_alpha is not None:
+                valid_mask = (render_alpha.reshape(-1, 1) > 0.5).squeeze()
+            else:
+                valid_mask = (render_depth.squeeze() > 0)
+            if valid_mask.sum() > 100:
+                depth_loss_pseudo = depth_loss_func(gt_depth[valid_mask], render_depth[valid_mask])
+            else:
+                depth_loss_pseudo = torch.tensor(0.0, device=render_depth.device)
 
             if torch.isnan(depth_loss_pseudo).sum() == 0:
                 loss_scale = min((iteration - args.start_sample_pseudo) / 500., 1)
@@ -316,7 +334,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     ema_depth_loss_for_log = 0.4 * depth_loss.item() + 0.6 * ema_depth_loss_for_log
             else:
                 ema_depth_loss_for_log = 0
-            if opt.lambda_opacity > 0:
+            if opt.lambda_opacity > 0 and not isinstance(opacity_loss, float):
                 ema_opacity_loss_for_log = 0.4 * opacity_loss.item() + 0.6 * ema_opacity_loss_for_log
             else:
                 ema_opacity_loss_for_log = 0.6 * ema_opacity_loss_for_log
@@ -394,7 +412,8 @@ def generate_idu_training_set(
     use_dreamscene: bool=False, use_sd21: bool=True,
     difix3d_guidance: float=0.0, difix3d_timesteps: list=None, difix3d_use_reference: bool=False,
     difix3d_prompt: str="remove degradation",
-    refine=True, idu_no_curriculum=False, idu_random_ap=False
+    refine=True, idu_no_curriculum=False, idu_random_ap=False,
+    refine_device: str="cuda:1", depth_device: str="cuda:2"
 ):
 
     gaussians = create_gaussian_model_from_dataset(dataset)
@@ -458,6 +477,11 @@ def generate_idu_training_set(
     cam_lists = cameraList_from_camInfos(idu_cam_infos, 1, dataset, is_pseudo_cam=idu_random_ap)
     imgs = render_idu_set(cam_lists, gaussians, pipeline, background, kernel_size, idu_random_ap)
 
+    # Free Gaussians memory after rendering — no longer needed in this function
+    del gaussians
+    del scene
+    torch.cuda.empty_cache()
+
     # render folder, used to store the unprocessed images
     frames_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "render")
     os.makedirs(frames_path, exist_ok=True)
@@ -474,7 +498,7 @@ def generate_idu_training_set(
         if use_flow_edit:
             refine_pipe = FlowEditRefineIDU(
                 save_path = refine_path,
-                device="cuda:0",
+                device=refine_device,
                 model_type=model_type
             )
             final_imgs = refine_pipe.run(
@@ -487,7 +511,7 @@ def generate_idu_training_set(
         elif use_difix3d:
             refine_pipe = Difix3DRefineIDU(
                 save_path=refine_path,
-                device="cuda:0",
+                device=refine_device,
                 model_name=difix3d_model,
                 use_reference=difix3d_use_reference
             )
@@ -501,7 +525,7 @@ def generate_idu_training_set(
         elif use_dreamscene:
             refine_pipe = DreamSceneRefineIDU(
                 save_path=refine_path,
-                device="cuda:0",
+                device=refine_device,
                 model="sd21" if use_sd21 else "diffusionsat",
             )
             final_imgs = refine_pipe.run(
@@ -522,7 +546,7 @@ def generate_idu_training_set(
     os.makedirs(depth_path, exist_ok=True)
     moge = MoGeIDU(
         depth_path,
-        device = "cuda:0",
+        device=depth_device,
         fov_x=fov_x
     )
     depths = moge.run(final_imgs)
@@ -545,7 +569,6 @@ def generate_idu_training_set(
     final_cam_lists = cameraList_from_camInfos(final_idu_cam_infos, 1, dataset, is_idu=True, is_pseudo_cam=idu_random_ap)
         
     del moge
-    del gaussians
     torch.cuda.empty_cache()
 
     return final_cam_lists
@@ -642,7 +665,8 @@ def training_idu_episode(
         difix3d_guidance=opt.idu_difix3d_guidance, difix3d_timesteps=opt.idu_difix3d_timesteps, 
         difix3d_use_reference=opt.idu_difix3d_use_reference, difix3d_prompt=opt.idu_difix3d_prompt,
         use_dreamscene=opt.idu_use_dreamscene, use_sd21=opt.idu_use_sd21,
-        refine=opt.idu_refine, idu_no_curriculum=opt.idu_no_curriculum, idu_random_ap=opt.idu_random_ap
+        refine=opt.idu_refine, idu_no_curriculum=opt.idu_no_curriculum, idu_random_ap=opt.idu_random_ap,
+        refine_device=opt.idu_refine_device, depth_device=opt.idu_depth_device
     )
 
     # load Gaussians and scene
@@ -842,14 +866,24 @@ def training_idu_episode(
                 subpixel_offset=subpixel_offset
             )
             render_image, render_depth = render_pkg["render"], render_pkg["render_depth"]
+            render_alpha = render_pkg.get("render_alpha", None)
             
             render_image_pil = to_pil_image(render_image)
-            moge_depth = moge_standalone.run([render_image_pil], pbar=False)[0]
+            moge_depth = get_moge_standalone(device=opt.idu_depth_device).run([render_image_pil], pbar=False)[0]
             gt_depth = torch.tensor(moge_depth).to(render_depth.device)
 
             gt_depth = gt_depth.reshape(-1, 1)
             render_depth = render_depth.reshape(-1, 1)
-            depth_loss_pseudo = depth_loss_func(gt_depth, render_depth)
+
+            # Filter out invalid regions (low alpha) to avoid NaN in Pearson correlation
+            if render_alpha is not None:
+                valid_mask = (render_alpha.reshape(-1, 1) > 0.5).squeeze()
+            else:
+                valid_mask = (render_depth.squeeze() > 0)
+            if valid_mask.sum() > 100:
+                depth_loss_pseudo = depth_loss_func(gt_depth[valid_mask], render_depth[valid_mask])
+            else:
+                depth_loss_pseudo = torch.tensor(0.0, device=render_depth.device)
 
             if torch.isnan(depth_loss_pseudo).sum() == 0:
                 loss_scale = 1.0
@@ -857,7 +891,7 @@ def training_idu_episode(
                 depth_loss += depth_loss_pseudo
         
         opacity_loss = 0.0
-        if opt.lambda_opacity > 0:
+        if opt.lambda_opacity > 0 and gaussians.get_opacity.numel() > 0:
             # Get each gaussians' opacity and use cross entropy loss
             opacity = gaussians.get_opacity.clamp(1.0e-3, 1.0 - 1.0e-3)
             opacity_loss = torch.nn.functional.binary_cross_entropy(opacity, opacity)
@@ -881,7 +915,7 @@ def training_idu_episode(
                     ema_depth_loss_for_log = 0.4 * depth_loss.item() + 0.6 * ema_depth_loss_for_log
             else:
                 ema_depth_loss_for_log = 0
-            if opt.lambda_opacity > 0:
+            if opt.lambda_opacity > 0 and not isinstance(opacity_loss, float):
                 ema_opacity_loss_for_log = 0.4 * opacity_loss.item() + 0.6 * ema_opacity_loss_for_log
             else:
                 ema_opacity_loss_for_log = 0.6 * ema_opacity_loss_for_log

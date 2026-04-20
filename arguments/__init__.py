@@ -252,6 +252,10 @@ class OptimizationParams(ParamGroup):
             )
         }
         
+        # IDU device assignment (multi-GPU)
+        self.idu_refine_device: str = "cuda:1"
+        self.idu_depth_device: str = "cuda:2"
+        
         # IDU rendering
         self.idu_position_lr_max_steps: int = self.idu_episode_iterations
         self.idu_render_size: int = 1024

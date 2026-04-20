@@ -72,6 +72,8 @@
 
     pip install --force-reinstall torch torchvision torchaudio
 
+    CUDAHOSTCXX=/usr/bin/gcc-11 CC=/usr/bin/gcc-11 CXX=/usr/bin/g++-11 
+
     pip install --no-build-isolation submodules/diff-gaussian-rasterization-depth
     pip install --no-build-isolation submodules/diff-surfel-rasterization
     pip install --no-build-isolation submodules/simple-knn
@@ -162,7 +164,7 @@ This stage focuses on reconstructing the initial 3D scene from satellite imagery
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX/JAX_068 \
+    -m ./outputs/JAX/JAX_068_2dgs \
     --eval \
     --port 6209 \
     --kernel_size 0.1 \
@@ -180,7 +182,8 @@ python train.py \
     --scaling_lr 0.001 \
     --rotation_lr 0.001 \
     --opacity_reset_interval 3000 \
-    --sample_pseudo_interval 10
+    --sample_pseudo_interval 10 \
+    --gs_backend 2dgs
 ```
 
 ### Stage 2: Synthesis with Iterative Dataset Update (IDU)
@@ -188,10 +191,10 @@ python train.py \
 This stage refines the geometry and synthesizes high-quality textures using an iterative dataset update strategy. This stage uses a pretrained model from Stage 1.
 
 ```bash
-python train.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068 \
-    --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
+    -m ./outputs/JAX_idu/JAX_068_2dgs \
+    --start_checkpoint ./outputs/JAX/JAX_068_2dgs/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
     --port 6209 \
@@ -218,7 +221,8 @@ python train.py \
     --idu_opacity_cooling_iterations 500 \
     --lambda_pseudo_depth 0.5 \
     --idu_densify_until_iter 9000 \
-    --idu_train_ratio 0.75
+    --idu_train_ratio 0.75 \
+    --gs_backend 2dgs
 ```
 
 ### Switching to 2DGS

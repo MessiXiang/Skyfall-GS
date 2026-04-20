@@ -23,13 +23,8 @@ class GaussianModel2D(GaussianModel3D):
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
 
-    @property
-    def get_scaling_with_3D_filter(self):
-        return self.get_scaling
-
-    @property
-    def get_opacity_with_3D_filter(self):
-        return self.get_opacity
+    # get_scaling_with_3D_filter and get_opacity_with_3D_filter are inherited
+    # from GaussianModel3D — the parent's prod(dim=1) works for 2D scales too
 
     def get_covariance(self, scaling_modifier=1):
         scaling = self.get_scaling * scaling_modifier
@@ -43,8 +38,10 @@ class GaussianModel2D(GaussianModel3D):
 
     @torch.no_grad()
     def compute_3D_filter(self, cameras):
-        del cameras
-        self.filter_3D = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.float32, device="cuda")
+        # Use the same distance-based filter as 3DGS
+        super().compute_3D_filter(cameras)
+        # Parent computes in float64; rasterizer needs float32
+        self.filter_3D = self.filter_3D.float()
 
     def create_from_pcd(self, pcd, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
@@ -60,7 +57,7 @@ class GaussianModel2D(GaussianModel3D):
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
         rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
         opacities = self.inverse_opacity_activation(
-            0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")
+            0.5 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -143,9 +140,21 @@ class GaussianModel2D(GaussianModel3D):
         PlyData([PlyElement.describe(elements, "vertex")]).write(path)
 
     def reset_opacity(self):
-        opacities_new = self.inverse_opacity_activation(
-            torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01)
-        )
+        # Account for 3D filter when resetting opacity (same logic as 3DGS)
+        current_opacity_with_filter = self.get_opacity_with_3D_filter
+        opacities_new = torch.min(current_opacity_with_filter, torch.ones_like(current_opacity_with_filter) * 0.01)
+
+        # Reverse the filter effect to get the raw opacity parameter
+        scales = self.get_scaling
+        scales_square = torch.square(scales)
+        det1 = scales_square.prod(dim=1)
+        scales_after_square = scales_square + torch.square(self.filter_3D)
+        det2 = scales_after_square.prod(dim=1)
+        coef = torch.sqrt(det1 / (det2 + 1e-8))
+        opacities_new = opacities_new / coef[..., None].clamp(min=1e-6)
+        opacities_new = opacities_new.clamp(min=1e-6, max=1 - 1e-6)
+        opacities_new = self.inverse_opacity_activation(opacities_new)
+
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -281,13 +290,34 @@ class GaussianModel2D(GaussianModel3D):
         self.densify_and_split(grads, max_grad, extent)
         split = self._xyz.shape[0]
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        # Extend filter_3D for newly added points (clone/split grow the point count).
+        # New points get filter_3D=0 → coef=1 → no opacity reduction, which is
+        # conservative; compute_3D_filter() is called right after to set real values.
+        n_current = self._xyz.shape[0]
+        n_filter = self.filter_3D.shape[0]
+        if n_current > n_filter:
+            pad = torch.zeros((n_current - n_filter, 1), dtype=torch.float32, device="cuda")
+            self.filter_3D = torch.cat([self.filter_3D, pad], dim=0)
+
+        # Use filtered opacity for pruning — small Gaussians whose filter-adjusted
+        # opacity is below threshold are floaters that don't contribute to rendering
+        prune_mask = (self.get_opacity_with_3D_filter < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
+        # Safety: prevent pruning ALL Gaussians
+        if prune_mask.all() and prune_mask.numel() > 0:
+            print(f"[WARNING] densify_and_prune would remove ALL {prune_mask.sum().item()} Gaussians, keeping top-opacity ones")
+            opacity_values = self.get_opacity_with_3D_filter.squeeze()
+            keep_count = max(int(prune_mask.numel() * 0.1), 100)
+            _, topk_indices = torch.topk(opacity_values, min(keep_count, opacity_values.numel()))
+            prune_mask[topk_indices] = False
+
         self.prune_points(prune_mask)
+        # Trim filter_3D to match after pruning
+        self.filter_3D = self.filter_3D[~prune_mask]
         after = self._xyz.shape[0]
         return clone - before, split - clone, split - after
 
