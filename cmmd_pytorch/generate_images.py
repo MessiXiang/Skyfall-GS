@@ -27,9 +27,9 @@ def load_pipeline(args):
     if "runway" in args.pipeline_id:
         pipeline = DiffusionPipeline.from_pretrained(
             args.pipeline_id, torch_dtype=torch.float16, safety_checker=None
-        ).to("cuda")
+        ).to("cuda:0")
     else:
-        pipeline = DiffusionPipeline.from_pretrained(args.pipeline_id, torch_dtype=torch.float16).to("cuda")
+        pipeline = DiffusionPipeline.from_pretrained(args.pipeline_id, torch_dtype=torch.float16).to("cuda:0")
     pipeline.set_progress_bar_config(disable=True)
     return pipeline
 

@@ -38,7 +38,7 @@ class ClipEmbeddingModel:
 
         self._model = CLIPVisionModelWithProjection.from_pretrained(_CLIP_MODEL_NAME).eval()
         if _CUDA_AVAILABLE:
-            self._model = self._model.cuda()
+            self._model = self._model.to("cuda:0")
 
         self.input_image_size = self.image_processor.crop_size["height"]
 
@@ -64,7 +64,7 @@ class ClipEmbeddingModel:
             return_tensors="pt",
         )
         if _CUDA_AVAILABLE:
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            inputs = {k: v.to("cuda:0") for k, v in inputs.items()}
 
         image_embs = self._model(**inputs).image_embeds.cpu()
         image_embs /= torch.linalg.norm(image_embs, axis=-1, keepdims=True)

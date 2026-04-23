@@ -107,7 +107,7 @@ class ModelParams(ParamGroup):
         # Resolution and rendering
         self._resolution: int = -1
         self._white_background: bool = False
-        self.data_device: str = "cuda"
+        self.data_device: str = "cuda:0"
         self._kernel_size: float = 0.1
         
         # Training options
@@ -176,6 +176,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_opacity: float = 0.1  # Entropy-based opacity regularization
         self.lambda_distortion: float = 0.0
         self.lambda_normal: float = 0.0
+        self.lambda_manhattan: float = 0.0
         
         # Appearance modeling learning rates
         self.embedding_lr: float = 0.005
@@ -253,8 +254,8 @@ class OptimizationParams(ParamGroup):
         }
         
         # IDU device assignment (multi-GPU)
-        self.idu_refine_device: str = "cuda:1"
-        self.idu_depth_device: str = "cuda:2"
+        self.idu_refine_device: str = "cuda:0"
+        self.idu_depth_device: str = "cuda:0"
         
         # IDU rendering
         self.idu_position_lr_max_steps: int = self.idu_episode_iterations

@@ -30,7 +30,7 @@ class GaussianModel2D(GaussianModel3D):
         scaling = self.get_scaling * scaling_modifier
         scaling_3d = torch.cat([scaling, torch.ones_like(scaling[:, :1])], dim=-1)
         rs = build_scaling_rotation(scaling_3d, self.get_rotation).permute(0, 2, 1)
-        transform = torch.zeros((self.get_xyz.shape[0], 4, 4), dtype=torch.float32, device="cuda")
+        transform = torch.zeros((self.get_xyz.shape[0], 4, 4), dtype=torch.float32, device="cuda:0")
         transform[:, :3, :3] = rs
         transform[:, 3, :3] = self.get_xyz
         transform[:, 3, 3] = 1.0
@@ -45,19 +45,19 @@ class GaussianModel2D(GaussianModel3D):
 
     def create_from_pcd(self, pcd, spatial_lr_scale):
         self.spatial_lr_scale = spatial_lr_scale
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to("cuda:0")
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to("cuda:0"))
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to("cuda:0")
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 1e-7)
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().to("cuda:0")), 1e-7)
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
-        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda:0")
         opacities = self.inverse_opacity_activation(
-            0.5 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda")
+            0.5 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float32, device="cuda:0")
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -66,12 +66,12 @@ class GaussianModel2D(GaussianModel3D):
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.filter_3D = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.float32, device="cuda")
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda:0")
+        self.filter_3D = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.float32, device="cuda:0")
 
         if self.appearance_enabled:
             self._embeddings = nn.Parameter(
-                torch.zeros((self.get_xyz.shape[0], 6 * self.appearance_n_fourier_freqs), device="cuda").requires_grad_(True)
+                torch.zeros((self.get_xyz.shape[0], 6 * self.appearance_n_fourier_freqs), device="cuda:0").requires_grad_(True)
             )
             embeddings = _get_fourier_features(pcd.points, num_features=self.appearance_n_fourier_freqs)
             embeddings.add_(torch.randn_like(embeddings) * 0.0001)
@@ -198,22 +198,22 @@ class GaussianModel2D(GaussianModel3D):
         for index, attr_name in enumerate(rot_names):
             rots[:, index] = np.asarray(plydata.elements[0][attr_name])
 
-        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float32, device="cuda").requires_grad_(True))
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float32, device="cuda:0").requires_grad_(True))
         self._features_dc = nn.Parameter(
-            torch.tensor(features_dc, dtype=torch.float32, device="cuda").transpose(1, 2).contiguous().requires_grad_(True)
+            torch.tensor(features_dc, dtype=torch.float32, device="cuda:0").transpose(1, 2).contiguous().requires_grad_(True)
         )
         self._features_rest = nn.Parameter(
-            torch.tensor(features_extra, dtype=torch.float32, device="cuda").transpose(1, 2).contiguous().requires_grad_(True)
+            torch.tensor(features_extra, dtype=torch.float32, device="cuda:0").transpose(1, 2).contiguous().requires_grad_(True)
         )
-        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float32, device="cuda").requires_grad_(True))
-        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float32, device="cuda").requires_grad_(True))
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float32, device="cuda").requires_grad_(True))
-        self.filter_3D = torch.zeros((xyz.shape[0], 1), dtype=torch.float32, device="cuda")
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float32, device="cuda:0").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float32, device="cuda:0").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float32, device="cuda:0").requires_grad_(True))
+        self.filter_3D = torch.zeros((xyz.shape[0], 1), dtype=torch.float32, device="cuda:0")
         self.active_sh_degree = self.max_sh_degree
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros((n_init_points), device="cuda:0")
         padded_grad[: grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(
@@ -248,7 +248,7 @@ class GaussianModel2D(GaussianModel3D):
         )
 
         prune_filter = torch.cat(
-            (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=torch.bool))
+            (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda:0", dtype=torch.bool))
         )
         self.prune_points(prune_filter)
 
@@ -296,7 +296,7 @@ class GaussianModel2D(GaussianModel3D):
         n_current = self._xyz.shape[0]
         n_filter = self.filter_3D.shape[0]
         if n_current > n_filter:
-            pad = torch.zeros((n_current - n_filter, 1), dtype=torch.float32, device="cuda")
+            pad = torch.zeros((n_current - n_filter, 1), dtype=torch.float32, device="cuda:0")
             self.filter_3D = torch.cat([self.filter_3D, pad], dim=0)
 
         # Use filtered opacity for pruning — small Gaussians whose filter-adjusted

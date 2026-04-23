@@ -17,7 +17,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, cx, cy, image, gt_alpha_mask,
                  image_name, uid, depth=None, mask=None,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", optimizing=False
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda:0", optimizing=False
                  ):
         super(Camera, self).__init__()
 
@@ -36,7 +36,7 @@ class Camera(nn.Module):
         except Exception as e:
             print(e)
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
-            self.data_device = torch.device("cuda")
+            self.data_device = torch.device("cuda:0")
 
         self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
         if depth is not None:
@@ -59,9 +59,9 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
         if optimizing:
-            self.world_view_transform = getWorld2View2(R, T, trans, scale).transpose(0, 1).cuda()
+            self.world_view_transform = getWorld2View2(R, T, trans, scale).transpose(0, 1).to("cuda:0")
         else:
-            self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
+            self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).to("cuda:0")
         self.projection_matrix = getProjectionMatrix(
             znear=self.znear, 
             zfar=self.zfar, 
@@ -69,7 +69,7 @@ class Camera(nn.Module):
             fovY=self.FoVy,
             cx=self.cx,
             cy=self.cy
-        ).transpose(0,1).cuda()
+        ).transpose(0,1).to("cuda:0")
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         

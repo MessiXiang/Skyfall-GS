@@ -186,6 +186,10 @@ python train.py \
     --gs_backend 2dgs
 ```
 
+```
+python train.py     -s ./data/datasets_JAX/JAX_068/     -m ./outputs/JAX/JAX_068_2dgs_creative2     --eval     --port 6209     --kernel_size 0.1     --resolution 1     --sh_degree 0     --appearance_enabled     --lambda_depth 0     --lambda_opacity 10     --densify_until_iter 21000     --densify_grad_threshold 0.0001     --lambda_pseudo_depth 0.5     --size_threshold 20     --opacity_reset_interval 3000     --gs_backend 2dgs     --lambda_normal 0.05     --lambda_manhattan 0.1
+```
+
 ### Stage 2: Synthesis with Iterative Dataset Update (IDU)
 
 This stage refines the geometry and synthesizes high-quality textures using an iterative dataset update strategy. This stage uses a pretrained model from Stage 1.

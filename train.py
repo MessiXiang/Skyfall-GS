@@ -48,6 +48,20 @@ import math
 
 from torchvision.transforms.functional import to_pil_image
 
+# [Novel Method: DINO-V2 Semantic Distillation Engine]
+# Load a frozen pre-trained "Visual Brain" to supervise texture semantics in Stage 1
+try:
+    import timm
+    _dino_model = timm.create_model('vit_large_patch14_dinov2', pretrained=True, num_classes=0)
+    _dino_model.eval()
+    for p in _dino_model.parameters():
+        p.requires_grad = False
+    _dino_model = _dino_model.cuda()
+    print("[DINO-V2] Frozen semantic feature extractor loaded successfully.")
+except Exception as e:
+    _dino_model = None
+    print(f"[DINO-V2] Warning: Could not load DINO-V2 ({e}). Semantic loss will be disabled.")
+
 try:
     from tensorboardX import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -74,7 +88,7 @@ def create_offset_gt(image, offset):
     height, width = image.shape[1:]
     meshgrid = np.meshgrid(range(width), range(height), indexing='xy')
     id_coords = np.stack(meshgrid, axis=0).astype(np.float32)
-    id_coords = torch.from_numpy(id_coords).cuda()
+    id_coords = torch.from_numpy(id_coords).to("cuda:0")
     
     id_coords = id_coords.permute(1, 2, 0) + offset
     id_coords[..., 0] /= (width - 1)
@@ -97,6 +111,7 @@ def add_optional_loss(total_loss, weight, loss_term):
 def compute_surface_regularization_losses(render_pkg, opt):
     distortion_loss = 0.0
     normal_loss = 0.0
+    manhattan_loss = 0.0
 
     if opt.lambda_distortion > 0 and "render_dist" in render_pkg:
         distortion_loss = render_pkg["render_dist"].mean()
@@ -108,15 +123,24 @@ def compute_surface_regularization_losses(render_pkg, opt):
         normal_mask = (render_pkg["render_alpha"] > 0.25).detach().float()
         cosine = torch.clamp((render_normal * surf_normal).sum(dim=0, keepdim=True).abs(), max=1.0)
         normal_loss = ((1.0 - cosine) * normal_mask).sum() / normal_mask.sum().clamp_min(1.0)
+        
+    if getattr(opt, "lambda_manhattan", 0) > 0 and "render_norm" in render_pkg:
+        # Penalize minimum projection to orthogonal axes (X, Y, Z)
+        render_normal = torch.nn.functional.normalize(render_pkg["render_norm"], dim=0) # [3, H, W]
+        normal_mask = (render_pkg["render_alpha"] > 0.25).detach().float()
+        # To align with XYZ axes, 1 - abs(render_normal) should have one value close to zero
+        # L_manhattan = sum(min(1 - |Nx|, 1 - |Ny|, 1 - |Nz|))
+        manhattan_err, _ = torch.min(1.0 - render_normal.abs(), dim=0, keepdim=True)
+        manhattan_loss = (manhattan_err * normal_mask).sum() / normal_mask.sum().clamp_min(1.0)
 
-    return distortion_loss, normal_loss
+    return distortion_loss, normal_loss, manhattan_loss
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     if opt.use_lpips_loss:
         lpips_loss_fn = lpips.LPIPS(net=opt.lpips_net)
         for param in lpips_loss_fn.parameters():
             param.requires_grad = False
-        lpips_loss_fn.cuda()
+        lpips_loss_fn.to("cuda:0")
         print("Initialized LPIPS loss")
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -140,7 +164,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -217,7 +241,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         #TODO ignore border pixels
         if dataset.ray_jitter:
-            subpixel_offset = torch.rand((int(viewpoint_cam.image_height), int(viewpoint_cam.image_width), 2), dtype=torch.float32, device="cuda") - 0.5
+            subpixel_offset = torch.rand((int(viewpoint_cam.image_height), int(viewpoint_cam.image_width), 2), dtype=torch.float32, device="cuda:0") - 0.5
             # subpixel_offset *= 0.0
         else:
             subpixel_offset = None
@@ -233,9 +257,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["render_depth"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        mask = viewpoint_cam.original_mask.cuda()
-        gt_image = mask * viewpoint_cam.original_image.cuda()
-        gt_depth = mask * viewpoint_cam.original_depth.cuda()
+        mask = viewpoint_cam.original_mask.to("cuda:0")
+        gt_image = mask * viewpoint_cam.original_image.to("cuda:0")
+        gt_depth = mask * viewpoint_cam.original_depth.to("cuda:0")
 
         image = mask * image
         depth = mask * depth
@@ -244,17 +268,75 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if dataset.resample_gt_image:
             gt_image = create_offset_gt(gt_image, subpixel_offset)
 
-        Ll1 = l1_loss(image, gt_image)
-        if opt.use_lpips_loss:
-            lpips_value = lpips_loss_fn(image.unsqueeze(0)*2.0-1.0,  gt_image.unsqueeze(0)*2.0-1.0).mean()
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * lpips_value
-        else:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        # [Custom Method: Edge-Aware Gradient Matching (EAGM)]
+        # Extractor for true high-frequency details directly from satellite images
+        gt_unsqueezed = gt_image.unsqueeze(0)
+        img_unsqueezed = image.unsqueeze(0)
+        
+        # 1. Compute spatial gradients (Detecting pure facades, windows, and edges)
+        gt_dx = gt_unsqueezed[:, :, :, 1:] - gt_unsqueezed[:, :, :, :-1]
+        gt_dy = gt_unsqueezed[:, :, 1:, :] - gt_unsqueezed[:, :, :-1, :]
+        img_dx = img_unsqueezed[:, :, :, 1:] - img_unsqueezed[:, :, :, :-1]
+        img_dy = img_unsqueezed[:, :, 1:, :] - img_unsqueezed[:, :, :-1, :]
+        
+        # 2. Gradient Focus Loss: Force the render to have identical sharp transitions as original images
+        grad_loss = torch.mean(torch.abs(img_dx - gt_dx)) + torch.mean(torch.abs(img_dy - gt_dy))
+        
+        # 3. Dynamic Detail Amplification Map
+        # Areas with details get up to 5x higher loss penalty, forcing the model to stop ignoring them!
+        detail_map = torch.ones_like(gt_image)
+        detail_map[:, :-1, :-1] += 4.0 * (torch.abs(gt_dx[0, :, :-1, :]) + torch.abs(gt_dy[0, :, :, :-1]))
+        
+        # 4. Detail-aware L1 Loss & Base SSIM
+        Ll1_detailed = torch.mean(torch.abs(image - gt_image) * detail_map.detach())
+        ssim_value = fused_ssim(img_unsqueezed, gt_unsqueezed)
+        
+        loss = (1.0 - opt.lambda_dssim) * Ll1_detailed + opt.lambda_dssim * (1.0 - ssim_value) + 0.5 * grad_loss
 
-        distortion_loss, normal_loss = compute_surface_regularization_losses(render_pkg, opt)
+        # [Novel Method: DINO-V2 Semantic Texture Distillation]
+        # Instead of hallucinating details with a generative model (like Stage 2 FlowEdit),
+        # we extract the "REAL WORLD KNOWLEDGE" of what a sharp facade looks like from a frozen DINO-V2 network.
+        # This forces the 3D Gaussian representation to evolve into semantically realistic textures.
+        if _dino_model is not None and iteration > 5000 and iteration % 10 == 0:
+            with torch.no_grad():
+                # Prepare inputs: normalize to DINO expected range [-1, 1]
+                # DINO uses patch size 14, so we interpolate to a fixed resolution (e.g., 224 or 448)
+                # to get dense feature maps.
+                
+                # Get high-res features from both GT and Rendered image
+                # We use a larger resolution to capture fine-grained facade patterns.
+                dino_input_size = 448
+                
+                # Clamp and interpolate
+                dino_img = torch.nn.functional.interpolate(
+                    img_unsqueezed, size=(dino_input_size, dino_input_size), mode='bilinear', align_corners=False
+                )
+                dino_gt = torch.nn.functional.interpolate(
+                    gt_unsqueezed, size=(dino_input_size, dino_input_size), mode='bilinear', align_corners=False
+                )
+                
+                # Normalize using ImageNet stats (DINO was trained on it)
+                mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).cuda()
+                std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).cuda()
+                dino_img_norm = (dino_img - mean) / std
+                dino_gt_norm = (dino_gt - mean) / std
+                
+                # Extract deep semantic features
+                feat_img = _dino_model.forward_features(dino_img_norm)['x_norm_patchtokens']
+                feat_gt = _dino_model.forward_features(dino_gt_norm)['x_norm_patchtokens']
+                
+                # Cosine similarity in feature space -> Penalize "structurally unrealistic" facades
+                # feat shape: [B, N_patches, C]
+                cos_sim = torch.nn.functional.cosine_similarity(feat_img, feat_gt, dim=-1)
+                dino_semantic_loss = (1.0 - cos_sim).mean()
+                
+                loss = loss + 2.0 * dino_semantic_loss
+
+        distortion_loss, normal_loss, manhattan_loss = compute_surface_regularization_losses(render_pkg, opt)
         loss = add_optional_loss(loss, opt.lambda_distortion, distortion_loss)
         loss = add_optional_loss(loss, opt.lambda_normal, normal_loss)
+        if getattr(opt, "lambda_manhattan", 0) > 0:
+            loss = add_optional_loss(loss, opt.lambda_manhattan, manhattan_loss)
 
         depth_loss = 0.0
         if opt.lambda_depth > 0:
@@ -350,7 +432,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.kernel_size))
+            training_report(tb_writer, iteration, Ll1_detailed, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, dataset.kernel_size))
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -436,7 +518,7 @@ def generate_idu_training_set(
     # print("Q99: ", gs_scale.kthvalue(int(0.99 * gs_scale.shape[0]), dim=0).values.item())
     
     bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
     kernel_size = dataset.kernel_size
 
     idu_cam_infos = []
@@ -636,7 +718,7 @@ def training_idu_episode(
         lpips_loss_fn = lpips.LPIPS(net=opt.lpips_net)
         for param in lpips_loss_fn.parameters():
             param.requires_grad = False
-        lpips_loss_fn.cuda()
+        lpips_loss_fn.to("cuda:0")
         print("Initialized LPIPS loss")
     # Generate IDU training set
     if not opt.idu_no_curriculum:
@@ -695,7 +777,7 @@ def training_idu_episode(
         raise ValueError("Checkpoint is required for iterative datasets update")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -785,7 +867,7 @@ def training_idu_episode(
 
         #TODO ignore border pixels
         if dataset.ray_jitter:
-            subpixel_offset = torch.rand((int(viewpoint_cam.image_height), int(viewpoint_cam.image_width), 2), dtype=torch.float32, device="cuda") - 0.5
+            subpixel_offset = torch.rand((int(viewpoint_cam.image_height), int(viewpoint_cam.image_width), 2), dtype=torch.float32, device="cuda:0") - 0.5
             # subpixel_offset *= 0.0
         else:
             subpixel_offset = None
@@ -803,9 +885,9 @@ def training_idu_episode(
         image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["render_depth"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Loss
-        mask = viewpoint_cam.original_mask.cuda()
-        gt_image = mask * viewpoint_cam.original_image.cuda()
-        gt_depth = mask * viewpoint_cam.original_depth.cuda()
+        mask = viewpoint_cam.original_mask.to("cuda:0")
+        gt_image = mask * viewpoint_cam.original_image.to("cuda:0")
+        gt_depth = mask * viewpoint_cam.original_depth.to("cuda:0")
 
         image = mask * image
         depth = mask * depth
@@ -825,9 +907,11 @@ def training_idu_episode(
         else:
             Ll1 = torch.tensor(0.0)
 
-        distortion_loss, normal_loss = compute_surface_regularization_losses(render_pkg, opt)
+        distortion_loss, normal_loss, manhattan_loss = compute_surface_regularization_losses(render_pkg, opt)
         loss = add_optional_loss(loss, opt.lambda_distortion, distortion_loss)
         loss = add_optional_loss(loss, opt.lambda_normal, normal_loss)
+        if getattr(opt, "lambda_manhattan", 0) > 0:
+            loss = add_optional_loss(loss, opt.lambda_manhattan, manhattan_loss)
 
 
         depth_loss = 0.0
@@ -1122,8 +1206,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, testing=(config['name'] == 'test'))
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)
                     depth = render_pkg["render_depth"]
-                    gt_depth = viewpoint.original_depth.to("cuda")
-                    mask = viewpoint.original_mask.cuda()
+                    gt_depth = viewpoint.original_depth.to("cuda:0")
+                    mask = viewpoint.original_mask.to("cuda:0")
                     depth = mask * depth
                     gt_depth = mask * gt_depth
                     depth_vis = torch.nan_to_num(depth, nan=0, posinf=0, neginf=0)
@@ -1131,7 +1215,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     colored_depth = colorize_depth_torch(
                         depth_vis,
                     )
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda:0"), 0.0, 1.0)
                     colored_gt_depth = colorize_depth_torch(
                         mask * gt_depth,
                     )

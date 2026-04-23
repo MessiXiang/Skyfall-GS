@@ -37,7 +37,7 @@ GaussianModel = GaussianModel3D
 
 
 def _create_screenspace_points(pc):
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda:0") + 0
     try:
         screenspace_points.retain_grad()
     except Exception:
@@ -108,7 +108,7 @@ def _render_3dgs(viewpoint_camera, pc, pipe, bg_color, kernel_size, scaling_modi
         subpixel_offset = torch.zeros(
             (int(viewpoint_camera.image_height), int(viewpoint_camera.image_width), 2),
             dtype=torch.float32,
-            device="cuda",
+            device="cuda:0",
         )
 
     raster_settings = GaussianRasterizationSettings3D(
@@ -210,7 +210,7 @@ def _render_2dgs(viewpoint_camera, pc, pipe, bg_color, kernel_size, scaling_modi
                 [0, 0, 0, 1],
             ],
             dtype=torch.float32,
-            device="cuda",
+            device="cuda:0",
         ).T
         world2pix = viewpoint_camera.full_proj_transform @ ndc2pix
         cov3d_precomp = (splat2world[:, [0, 1, 3]] @ world2pix[:, [0, 1, 3]]).permute(0, 2, 1).reshape(-1, 9)

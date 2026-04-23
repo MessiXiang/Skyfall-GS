@@ -226,7 +226,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         scale_factor = dataset.resolution
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
         kernel_size = dataset.kernel_size
 
         # Read camera path json

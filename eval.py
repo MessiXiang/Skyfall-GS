@@ -276,7 +276,7 @@ def preprocess_image_for_iqa(img_bgr, target_size=None):
     return img_tensor
 
 class IntegratedIQACalculator:
-    def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, device='cuda:0' if torch.cuda.is_available() else 'cpu'):
         self.device = device
 
         # Initialize PyTorch IQA metrics (only the ones we need)
@@ -418,7 +418,7 @@ def main():
     parser.add_argument("--no_patchify", action="store_true", default=False, help="Do not use patchify for CLIP-FID/CMMD")
     parser.add_argument("--methods", nargs='+', default=['citydreamer', 'gaussiancity', 'ours_stage1', 'ours_stage2', 'difix'], help="List of methods to evaluate")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size for CMMD")
-    parser.add_argument("--device", type=str, default='cuda', help="Device to use for computation (cuda/cpu)")
+    parser.add_argument("--device", type=str, default='cuda:0', help="Device to use for computation (cuda/cpu)")
 
     args = parser.parse_args()
 

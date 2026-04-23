@@ -278,15 +278,15 @@ def load_standard_ply(gaussians: object, path: str):
         rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
     # Convert to tensors and assign to gaussians
-    gaussians._xyz = torch.nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-    gaussians._features_dc = torch.nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-    gaussians._features_rest = torch.nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-    gaussians._opacity = torch.nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-    gaussians._scaling = torch.nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
-    gaussians._rotation = torch.nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+    gaussians._xyz = torch.nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda:0").requires_grad_(True))
+    gaussians._features_dc = torch.nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda:0").transpose(1, 2).contiguous().requires_grad_(True))
+    gaussians._features_rest = torch.nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda:0").transpose(1, 2).contiguous().requires_grad_(True))
+    gaussians._opacity = torch.nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda:0").requires_grad_(True))
+    gaussians._scaling = torch.nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda:0").requires_grad_(True))
+    gaussians._rotation = torch.nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda:0").requires_grad_(True))
 
     # Set filter_3D as a direct attribute (not parameter) - this is how Mip-Splatting accesses it
-    gaussians.filter_3D = torch.tensor(filter_3D, dtype=torch.float, device="cuda")
+    gaussians.filter_3D = torch.tensor(filter_3D, dtype=torch.float, device="cuda:0")
 
     gaussians.active_sh_degree = gaussians.max_sh_degree
 
@@ -323,7 +323,7 @@ class PipelineParams:
 
 class MinimalArgs:
     """Minimal args object for camera loading."""
-    def __init__(self, data_device="cuda"):
+    def __init__(self, data_device="cuda:0"):
         self.data_device = data_device
 
 @torch.no_grad()
@@ -348,7 +348,7 @@ def render_video_from_ply(ply_path: str, camera_path: str, output_path: str = No
 
     # Background color
     bg_color = [1, 1, 1] if white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
 
     # Read camera path json
     with open(camera_path, 'r') as file:
@@ -378,7 +378,7 @@ def render_video_from_ply(ply_path: str, camera_path: str, output_path: str = No
     os.makedirs(os.path.dirname(video_path), exist_ok=True)
 
     # Convert camera infos to camera objects
-    minimal_args = MinimalArgs(data_device="cuda")
+    minimal_args = MinimalArgs(data_device="cuda:0")
     cam_infos = cameraList_from_camInfos(cams, 1.0, minimal_args, is_testing=True)
 
     # Render frames

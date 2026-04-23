@@ -664,7 +664,7 @@ def evaluate_scene(dataset, pipeline, scene_name, satellite_data_path, gt_data_p
         # Setup background and pipeline
         scale_factor = dataset.resolution
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda:0")
         kernel_size = dataset.kernel_size
 
         # gaussians.prune_by_radius(500)
