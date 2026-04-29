@@ -5,8 +5,8 @@ Calculates CLIP-FID, CMMD, PSNR, SSIM, and LPIPS between GT images and method ou
 Usage:
 python eval.py \
     --data_dir results_eval/data_eval_JAX \
-    --temp_dir temp_frames_JAX \
-    --methods mip-splatting sat-nerf eogs corgs ours_stage1 ours_stage2 \
+    --temp_dir /root/autodl-tmp/temp_dir \
+    --methods mip-splatting sat-nerf eogs corgs ours_stage1 ours_stage2 my_method_vggt_sample \
     --output_file metrics_results_JAX.csv \
     --frame_rate 30 \
     --resolution 1024 \
@@ -14,7 +14,7 @@ python eval.py \
 
 python eval.py \
     --data_dir results_eval/data_eval_NYC \
-    --temp_dir temp_frames_NYC \
+    --temp_dir /root/autodl-tmp/temp_dir \
     --methods citydreamer gaussiancity corgs ours_stage1 ours_stage2 \
     --output_file metrics_results_NYC.csv \
     --frame_rate 24 \
@@ -23,6 +23,16 @@ python eval.py \
 """
 
 import os
+
+# Use hf-mirror and store downloaded Hugging Face models on the data disk.
+# Keep token lookup compatible with an existing `hf-cli login` by not changing HF_HOME.
+HF_CACHE_DIR = "/root/autodl-tmp/huggingface/hub"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HUB_CACHE", HF_CACHE_DIR)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_CACHE_DIR)
+os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
+
 import cv2
 import numpy as np
 import torch

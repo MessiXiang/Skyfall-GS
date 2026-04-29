@@ -170,7 +170,7 @@ This stage refines the geometry and synthesizes high-quality textures using an i
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068_vggt \
+    -m ./outputs/JAX_idu/JAX_068_idu_test_5 \
     --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
@@ -190,17 +190,23 @@ python train.py \
     --idu_render_size 1024 \
     --idu_flow_edit_n_min 4 \
     --idu_flow_edit_n_max 10 \
-    --idu_grid_size 3 \
+    --idu_grid_size 10 \
     --idu_grid_width 512 \
     --idu_grid_height 512 \
     --idu_episode_iterations 10000 \
     --idu_iter_full_train 0 \
     --idu_opacity_cooling_iterations 500 \
     --lambda_pseudo_depth 0.5 \
-    --idu_depth_estimator vggt \
-    --idu_vggt_model_name facebook/VGGT-1B \
     --idu_densify_until_iter 9000 \
-    --idu_train_ratio 0.75
+    --idu_train_ratio 0.75 \
+    --idu_vggt_guided_sampling \
+    --idu_depth_estimator moge \
+    --idu_vggt_model_name facebook/VGGT-1B \
+    --idu_vggt_candidate_multiplier 4 \
+    --idu_vggt_keep_ratio 0.5 \
+    --idu_vggt_min_keep 8 \
+    --idu_vggt_confidence_percentile 20 \
+    --idu_vggt_confidence_batch_size 4
 ```
 
 > If you use VGGT for pseudo depth in Stage 2, make sure VGGT dependencies are installed:

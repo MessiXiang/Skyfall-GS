@@ -13,6 +13,17 @@ from submodules.MoGe.idu_depth import MoGeIDU
 
 sys.path.append("submodules/vggt")
 
+HF_CACHE_DIR = "/root/autodl-tmp/huggingface/hub"
+HF_ENDPOINT = "https://hf-mirror.com"
+
+
+def configure_hf_cache():
+    os.makedirs(HF_CACHE_DIR, exist_ok=True)
+    os.environ.setdefault("HF_ENDPOINT", HF_ENDPOINT)
+    os.environ.setdefault("HF_HOME", "/root/autodl-tmp/huggingface")
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_CACHE_DIR)
+    os.environ.setdefault("TRANSFORMERS_CACHE", HF_CACHE_DIR)
+
 
 class VGGTIDU:
     def __init__(
@@ -30,11 +41,17 @@ class VGGTIDU:
         self.input_size = input_size
 
         os.makedirs(save_path, exist_ok=True)
+        configure_hf_cache()
 
         # Delay heavy import until needed
         vggt_module = importlib.import_module("vggt.models.vggt")
         VGGT = getattr(vggt_module, "VGGT")
-        self.model = VGGT.from_pretrained(model_name).to(device).eval()
+        try:
+            print(f"Loading VGGT from local Hugging Face cache: {HF_CACHE_DIR}")
+            self.model = VGGT.from_pretrained(model_name, local_files_only=True).to(device).eval()
+        except Exception as local_error:
+            print(f"Local VGGT weights not found or incomplete ({local_error}); downloading from {HF_ENDPOINT} to {HF_CACHE_DIR}")
+            self.model = VGGT.from_pretrained(model_name).to(device).eval()
 
     def __del__(self):
         if getattr(self, "model", None) is not None:
@@ -47,8 +64,13 @@ class VGGTIDU:
 
     @torch.no_grad()
     def run(self, refined_imgs: List[PILImage], pbar: bool = True) -> List[np.ndarray]:
+        depths, _ = self.run_with_confidence(refined_imgs, pbar=pbar, return_confidence=False)
+        return depths
+
+    @torch.no_grad()
+    def run_with_confidence(self, refined_imgs: List[PILImage], pbar: bool = True, return_confidence: bool = True):
         if len(refined_imgs) == 0:
-            return []
+            return [], []
 
         images, original_sizes = self._preprocess(refined_imgs)
 
@@ -61,10 +83,11 @@ class VGGTIDU:
         else:
             predictions = self.model(images.to(self.device))
 
-        depth = predictions["depth"]
-        depth = self._normalize_depth_shape(depth, len(original_sizes))
+        depth = self._normalize_map_shape(predictions["depth"], len(original_sizes), "depth")
+        confidence = self._extract_confidence(predictions, len(original_sizes)) if return_confidence else None
 
         resized_depths = []
+        resized_confidences = []
         for idx, (h, w) in enumerate(original_sizes):
             d = depth[idx].detach().float().cpu()
             d = torch.nn.functional.interpolate(
@@ -75,7 +98,17 @@ class VGGTIDU:
             )[0, 0]
             resized_depths.append(d.numpy())
 
-        return resized_depths
+            if confidence is not None:
+                c = confidence[idx].detach().float().cpu()
+                c = torch.nn.functional.interpolate(
+                    c[None, None],
+                    size=(h, w),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0]
+                resized_confidences.append(c.numpy())
+
+        return resized_depths, resized_confidences
 
     def _preprocess(self, imgs: List[PILImage]):
         to_tensor = tvt.ToTensor()
@@ -96,28 +129,45 @@ class VGGTIDU:
         images = torch.stack(tensors, dim=0)
         return images, original_sizes
 
+    def _extract_confidence(self, predictions, num_imgs: int):
+        # VGGT versions expose confidence under slightly different names.
+        for key in ("depth_conf", "depth_confidence", "world_points_conf", "conf", "confidence"):
+            if key in predictions:
+                return self._normalize_map_shape(predictions[key], num_imgs, key)
+        print("Warning: VGGT did not return a confidence map; falling back to inverse depth-gradient confidence.")
+        depth = self._normalize_map_shape(predictions["depth"], num_imgs, "depth")
+        grad_y = torch.nn.functional.pad(torch.abs(depth[:, 1:, :] - depth[:, :-1, :]), (0, 0, 0, 1))
+        grad_x = torch.nn.functional.pad(torch.abs(depth[:, :, 1:] - depth[:, :, :-1]), (0, 1, 0, 0))
+        return 1.0 / (grad_x + grad_y + 1.0e-6)
+
     @staticmethod
-    def _normalize_depth_shape(depth: torch.Tensor, num_imgs: int) -> torch.Tensor:
+    def _normalize_map_shape(value: torch.Tensor, num_imgs: int, name: str) -> torch.Tensor:
         # Typical depth shapes:
-        # [B, S, H, W, 1] or [S, H, W, 1] or [S, H, W]
-        if depth.dim() == 5 and depth.shape[0] == 1:
-            depth = depth[0]
+        # [B, S, H, W, 1], [B, S, H, W], [S, H, W, 1], [S, H, W]
+        if value.dim() == 5 and value.shape[0] == 1:
+            value = value[0]
 
-        if depth.dim() == 4 and depth.shape[-1] == 1:
-            depth = depth[..., 0]
+        if value.dim() == 4 and value.shape[0] == 1 and value.shape[1] == num_imgs:
+            value = value[0]
 
-        if depth.dim() == 2:
-            depth = depth.unsqueeze(0)
+        if value.dim() == 4 and value.shape[-1] == 1:
+            value = value[..., 0]
 
-        if depth.dim() != 3:
-            raise RuntimeError(f"Unexpected VGGT depth shape: {tuple(depth.shape)}")
+        if value.dim() == 4 and value.shape[1] == 1:
+            value = value[:, 0]
 
-        if depth.shape[0] != num_imgs:
+        if value.dim() == 2:
+            value = value.unsqueeze(0)
+
+        if value.dim() != 3:
+            raise RuntimeError(f"Unexpected VGGT {name} shape: {tuple(value.shape)}")
+
+        if value.shape[0] != num_imgs:
             raise RuntimeError(
-                f"Depth/image count mismatch: depth has {depth.shape[0]} items, expected {num_imgs}"
+                f"VGGT {name}/image count mismatch: {name} has {value.shape[0]} items, expected {num_imgs}"
             )
 
-        return depth
+        return value
 
 
 def build_depth_estimator(
@@ -126,11 +176,12 @@ def build_depth_estimator(
     device: str,
     fov_x: float,
     vggt_model_name: str = "facebook/VGGT-1B",
+    vggt_input_size: int = 518,
 ):
     name = estimator_name.lower()
     if name == "moge":
         return MoGeIDU(save_path, device, fov_x)
     if name == "vggt":
-        return VGGTIDU(save_path, device, fov_x=fov_x, model_name=vggt_model_name)
+        return VGGTIDU(save_path, device, fov_x=fov_x, model_name=vggt_model_name, input_size=vggt_input_size)
 
     raise ValueError(f"Unknown depth estimator: {estimator_name}. Expected one of [moge, vggt].")

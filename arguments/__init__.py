@@ -233,6 +233,17 @@ class OptimizationParams(ParamGroup):
         self.idu_num_samples_per_view: int = 4
         self.idu_train_ratio: float = 0.5
         
+        # VGGT-guided IDU sampling. When enabled, IDU first renders cheap
+        # 3DGS candidate views, scores them with VGGT confidence, and only
+        # sends the lowest-confidence views to diffusion/depth refinement.
+        self.idu_vggt_guided_sampling: bool = False
+        self.idu_vggt_candidate_multiplier: int = 3
+        self.idu_vggt_keep_ratio: float = 0.35
+        self.idu_vggt_min_keep: int = 4
+        self.idu_vggt_confidence_percentile: float = 20.0
+        self.idu_vggt_confidence_input_size: int = 518
+        self.idu_vggt_confidence_batch_size: int = 4
+        
         # Dataset configuration
         self.datasets_type: str = "jax_v1"
         self.idu_params: Dict[str, IDUParams] = {

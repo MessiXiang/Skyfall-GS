@@ -10,6 +10,15 @@
 #
 
 import os
+
+HF_HOME_DIR = "/root/autodl-tmp/huggingface"
+HF_HUB_CACHE_DIR = "/root/autodl-tmp/huggingface/hub"
+os.makedirs(HF_HUB_CACHE_DIR, exist_ok=True)
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_HOME", HF_HOME_DIR)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HUB_CACHE_DIR)
+os.environ.setdefault("TRANSFORMERS_CACHE", HF_HUB_CACHE_DIR)
+
 import numpy as np
 import torch
 import random
@@ -33,9 +42,6 @@ from scene.dataset_readers import CameraInfo
 
 from PIL import Image
 from utils.idu_depth_utils import build_depth_estimator
-
-# pip install diffusers==0.30.1 huggingface-hub==0.33.4 transformers==4.46.3 tokenizers==0.20.3 (default)
-from submodules.FlowEdit.idu_refine import FlowEditRefineIDU 
 
 # fused SSIM, for faster training
 
@@ -361,6 +367,99 @@ def render_idu_set(views, gaussians, pipeline, background, kernel_size, idu_rand
         imgs.append(img)
     return imgs
 
+def _as_pil_image(img):
+    if isinstance(img, Image.Image):
+        return img.convert("RGB")
+    return Image.fromarray((img * 255 + 0.5).clip(0, 255).astype(np.uint8)).convert("RGB")
+
+def _score_vggt_low_confidence_candidates(
+    imgs,
+    save_path,
+    fov_x,
+    vggt_model_name,
+    confidence_percentile=20.0,
+    batch_size=4,
+    input_size=518,
+):
+    """Return one low-confidence score per image; larger means more worth refining."""
+    confidence_percentile = float(np.clip(confidence_percentile, 0.0, 100.0))
+    batch_size = max(1, int(batch_size))
+    scorer = build_depth_estimator(
+        "vggt",
+        save_path,
+        device="cuda:0",
+        fov_x=fov_x,
+        vggt_model_name=vggt_model_name,
+        vggt_input_size=input_size,
+    )
+    scores = []
+    for start in tqdm(range(0, len(imgs), batch_size), desc="VGGT confidence scoring"):
+        batch_imgs = [_as_pil_image(img) for img in imgs[start:start + batch_size]]
+        _, confidences = scorer.run_with_confidence(batch_imgs, pbar=False, return_confidence=True)
+        for conf in confidences:
+            conf = np.asarray(conf, dtype=np.float32)
+            finite = np.isfinite(conf)
+            if finite.any():
+                low_conf = np.nanpercentile(conf[finite], confidence_percentile)
+                scores.append(float(-low_conf))
+            else:
+                scores.append(float("inf"))
+    del scorer
+    torch.cuda.empty_cache()
+    return scores
+
+def _select_vggt_guided_idu_views(
+    idu_cam_infos,
+    imgs,
+    dataset,
+    elevation,
+    radius,
+    fov_x,
+    vggt_model_name,
+    keep_ratio,
+    min_keep,
+    confidence_percentile,
+    batch_size,
+    input_size,
+):
+    if len(idu_cam_infos) == 0:
+        return idu_cam_infos, imgs
+
+    keep_ratio = float(np.clip(keep_ratio, 0.0, 1.0))
+    keep_count = int(math.ceil(len(idu_cam_infos) * keep_ratio))
+    keep_count = max(1, min(len(idu_cam_infos), max(int(min_keep), keep_count)))
+    score_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "vggt_confidence")
+    os.makedirs(score_path, exist_ok=True)
+    scores = _score_vggt_low_confidence_candidates(
+        imgs,
+        score_path,
+        fov_x,
+        vggt_model_name,
+        confidence_percentile=confidence_percentile,
+        batch_size=batch_size,
+        input_size=input_size,
+    )
+    selected_indices = sorted(np.argsort(scores)[-keep_count:].tolist())
+    score_log_path = os.path.join(score_path, "selected_candidates.csv")
+    with open(score_log_path, "w") as f:
+        f.write("idx,score,selected,image_name\n")
+        selected_set = set(selected_indices)
+        for idx, (score, cam_info) in enumerate(zip(scores, idu_cam_infos)):
+            f.write(f"{idx},{score},{int(idx in selected_set)},{cam_info.image_name}\n")
+    print(
+        f"VGGT-guided IDU sampling selected {len(selected_indices)}/{len(idu_cam_infos)} "
+        f"lowest-confidence candidate views. Log: {score_log_path}"
+    )
+    return [idu_cam_infos[i] for i in selected_indices], [imgs[i] for i in selected_indices]
+
+def _make_unique_idu_image_names(idu_cam_infos, elevation, radius):
+    unique_cam_infos = []
+    for idx, cam_info in enumerate(idu_cam_infos):
+        unique_cam_infos.append(
+            cam_info._replace(image_name=f"e{elevation}_r{radius}_cand{idx:05d}.png")
+        )
+    return unique_cam_infos
+
 @torch.no_grad()
 def generate_idu_training_set(
     dataset : ModelParams,
@@ -374,7 +473,11 @@ def generate_idu_training_set(
     depth_estimator_name: str="moge", vggt_model_name: str="facebook/VGGT-1B",
     difix3d_guidance: float=0.0, difix3d_timesteps: list=None, difix3d_use_reference: bool=False,
     difix3d_prompt: str="remove degradation",
-    refine=True, idu_no_curriculum=False, idu_random_ap=False
+    refine=True, idu_no_curriculum=False, idu_random_ap=False,
+    vggt_guided_sampling: bool=False, vggt_candidate_multiplier: int=3,
+    vggt_keep_ratio: float=0.35, vggt_min_keep: int=4,
+    vggt_confidence_percentile: float=20.0, vggt_confidence_batch_size: int=4,
+    vggt_confidence_input_size: int=518
 ):
 
     gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
@@ -401,6 +504,9 @@ def generate_idu_training_set(
     kernel_size = dataset.kernel_size
 
     idu_cam_infos = []
+    candidate_multiplier = max(1, int(vggt_candidate_multiplier)) if vggt_guided_sampling else 1
+    candidate_idu_num_cams = max(1, int(idu_num_cams) * candidate_multiplier)
+    candidate_num_samples_per_view = 1 if vggt_guided_sampling else idu_num_samples_per_view
     if isinstance(elevation, list) and isinstance(radius, list):
         assert len(elevation) == len(radius)
         assert idu_no_curriculum, "When using multiple elevations and radii, idu_no_curriculum must be set to True"
@@ -410,8 +516,8 @@ def generate_idu_training_set(
                     target,
                     ele,
                     rad,
-                    idu_num_cams,
-                    idu_num_samples_per_view,
+                    candidate_idu_num_cams,
+                    candidate_num_samples_per_view,
                     height,
                     width,
                     fov_x,
@@ -425,18 +531,35 @@ def generate_idu_training_set(
                 target,
                 elevation,
                 radius,
-                idu_num_cams,
-                idu_num_samples_per_view,
+                candidate_idu_num_cams,
+                candidate_num_samples_per_view,
                 height,
                 width,
                 fov_x,
                 use_new_id=(not idu_random_ap),
                 num_train_cams=(len(scene.getTrainCameras()) if idu_random_ap else None)
             )
+    idu_cam_infos = _make_unique_idu_image_names(idu_cam_infos, elevation, radius)
     print(f"Generated {len(idu_cam_infos)} IDU cameras")
 
     cam_lists = cameraList_from_camInfos(idu_cam_infos, 1, dataset, is_pseudo_cam=idu_random_ap)
     imgs = render_idu_set(cam_lists, gaussians, pipeline, background, kernel_size, idu_random_ap)
+
+    if vggt_guided_sampling:
+        idu_cam_infos, imgs = _select_vggt_guided_idu_views(
+            idu_cam_infos,
+            imgs,
+            dataset,
+            elevation,
+            radius,
+            fov_x,
+            vggt_model_name,
+            keep_ratio=vggt_keep_ratio / candidate_multiplier,
+            min_keep=vggt_min_keep,
+            confidence_percentile=vggt_confidence_percentile,
+            batch_size=vggt_confidence_batch_size,
+            input_size=vggt_confidence_input_size,
+        )
 
     # render folder, used to store the unprocessed images
     frames_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "render")
@@ -452,6 +575,8 @@ def generate_idu_training_set(
     final_imgs = []
     if refine:
         if use_flow_edit:
+            # pip install diffusers==0.30.1 huggingface-hub==0.33.4 transformers==4.46.3 tokenizers==0.20.3 (default)
+            from submodules.FlowEdit.idu_refine import FlowEditRefineIDU
             refine_pipe = FlowEditRefineIDU(
                 save_path = refine_path,
                 device="cuda:0",
@@ -512,17 +637,20 @@ def generate_idu_training_set(
 
     final_idu_cam_infos = []
     # Save to cam_infos
+    repeat_selected_views = max(1, int(idu_num_samples_per_view)) if vggt_guided_sampling else 1
     for idx, cam_info in enumerate(idu_cam_infos):
-        final_cam_info = CameraInfo(
-            uid=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-            FovY=cam_info.FovY, FovX=cam_info.FovX, 
-            cx=0, cy=0,
-            image=final_imgs[idx], image_path=cam_info.image_path,
-            image_name=cam_info.image_name, 
-            depth=depths[idx], mask=None,
-            width=cam_info.width, height=cam_info.height
-        )
-        final_idu_cam_infos.append(final_cam_info)
+        for repeat_idx in range(repeat_selected_views):
+            image_name = cam_info.image_name if repeat_selected_views == 1 else cam_info.image_name.replace(".png", f"_rep{repeat_idx:02d}.png")
+            final_cam_info = CameraInfo(
+                uid=cam_info.uid, R=cam_info.R, T=cam_info.T, 
+                FovY=cam_info.FovY, FovX=cam_info.FovX, 
+                cx=0, cy=0,
+                image=final_imgs[idx], image_path=cam_info.image_path,
+                image_name=image_name, 
+                depth=depths[idx], mask=None,
+                width=cam_info.width, height=cam_info.height
+            )
+            final_idu_cam_infos.append(final_cam_info)
 
     final_cam_lists = cameraList_from_camInfos(final_idu_cam_infos, 1, dataset, is_idu=True, is_pseudo_cam=idu_random_ap)
         
@@ -625,7 +753,14 @@ def training_idu_episode(
         difix3d_use_reference=opt.idu_difix3d_use_reference, difix3d_prompt=opt.idu_difix3d_prompt,
         use_dreamscene=opt.idu_use_dreamscene, use_sd21=opt.idu_use_sd21,
         depth_estimator_name=opt.idu_depth_estimator, vggt_model_name=opt.idu_vggt_model_name,
-        refine=opt.idu_refine, idu_no_curriculum=opt.idu_no_curriculum, idu_random_ap=opt.idu_random_ap
+        refine=opt.idu_refine, idu_no_curriculum=opt.idu_no_curriculum, idu_random_ap=opt.idu_random_ap,
+        vggt_guided_sampling=opt.idu_vggt_guided_sampling,
+        vggt_candidate_multiplier=opt.idu_vggt_candidate_multiplier,
+        vggt_keep_ratio=opt.idu_vggt_keep_ratio,
+        vggt_min_keep=opt.idu_vggt_min_keep,
+        vggt_confidence_percentile=opt.idu_vggt_confidence_percentile,
+        vggt_confidence_batch_size=opt.idu_vggt_confidence_batch_size,
+        vggt_confidence_input_size=opt.idu_vggt_confidence_input_size
     )
 
     # load Gaussians and scene
@@ -648,7 +783,7 @@ def training_idu_episode(
     if checkpoint_path:
         print(f"Restoring model from checkpoint {checkpoint_path}")
         # original implementation
-        (model_params, first_iter) = torch.load(checkpoint_path)
+        (model_params, first_iter) = torch.load(checkpoint_path, weights_only=False)
         gaussians.restore(model_params, opt, iterative_datasets_update=True)
         print("Restored model from checkpoint at iteration {}".format(first_iter))
         opt.iterations = first_iter + opt.idu_episode_iterations  # TODO: make this a parameter
