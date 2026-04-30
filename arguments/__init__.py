@@ -263,6 +263,25 @@ class OptimizationParams(ParamGroup):
         self.idu_position_lr_max_steps: int = self.idu_episode_iterations
         self.idu_render_size: int = 1024
 
+        # IDU FlowEdit post super-resolution. Scheme B keeps the final
+        # training image size unchanged: refine -> upscale -> downsample back.
+        self.idu_use_sr: bool = False
+        self.idu_sr_method: str = "pil"  # [pil, lanczos, bicubic, diffusers, sd-x4]
+        self.idu_sr_scale: int = 2
+        self.idu_sr_downsample_back: bool = True
+        self.idu_sr_save_upscaled: bool = False
+        self.idu_sr_model_name: str = "stabilityai/stable-diffusion-x4-upscaler"
+        self.idu_sr_prompt: str = "high resolution satellite image, sharp buildings, crisp roads, realistic details"
+        self.idu_sr_negative_prompt: str = "blur, low resolution, artifacts, distorted geometry, text, watermark"
+        self.idu_sr_steps: int = 20
+        self.idu_sr_guidance_scale: float = 0.0
+        self.idu_sr_noise_level: int = 20
+        self.idu_sr_tile_size: int = 256
+        self.idu_sr_tile_overlap: int = 32
+        self.idu_sr_post_sharpen_percent: int = 80
+        self.idu_sr_post_sharpen_radius: float = 0.8
+        self.idu_sr_post_sharpen_threshold: int = 2
+
         # IDU pseudo-depth backend
         self.idu_depth_estimator: str = "moge"  # [moge, vggt]
         self.idu_vggt_model_name: str = "facebook/VGGT-1B"

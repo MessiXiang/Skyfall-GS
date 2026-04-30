@@ -42,6 +42,7 @@ from scene.dataset_readers import CameraInfo
 
 from PIL import Image
 from utils.idu_depth_utils import build_depth_estimator
+from utils.idu_sr_utils import build_super_resolution_processor
 
 # fused SSIM, for faster training
 
@@ -477,7 +478,16 @@ def generate_idu_training_set(
     vggt_guided_sampling: bool=False, vggt_candidate_multiplier: int=3,
     vggt_keep_ratio: float=0.35, vggt_min_keep: int=4,
     vggt_confidence_percentile: float=20.0, vggt_confidence_batch_size: int=4,
-    vggt_confidence_input_size: int=518
+    vggt_confidence_input_size: int=518,
+    use_sr: bool=False, sr_method: str="pil", sr_scale: int=2,
+    sr_downsample_back: bool=True, sr_save_upscaled: bool=False,
+    sr_model_name: str="stabilityai/stable-diffusion-x4-upscaler",
+    sr_prompt: str="high resolution satellite image, sharp buildings, crisp roads, realistic details",
+    sr_negative_prompt: str="blur, low resolution, artifacts, distorted geometry, text, watermark",
+    sr_steps: int=20, sr_guidance_scale: float=0.0, sr_noise_level: int=20,
+    sr_tile_size: int=256, sr_tile_overlap: int=32,
+    sr_post_sharpen_percent: int=80, sr_post_sharpen_radius: float=0.8,
+    sr_post_sharpen_threshold: int=2
 ):
 
     gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
@@ -622,6 +632,33 @@ def generate_idu_training_set(
             # from torch tensor to PIL
             final_imgs.append(Image.fromarray((img * 255 + 0.5).clip(0, 255).astype(np.uint8)))
 
+    if use_sr:
+        sr_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "render_refine_sr")
+        sr_processor = build_super_resolution_processor(
+            sr_method,
+            sr_path,
+            scale=sr_scale,
+            downsample_back=sr_downsample_back,
+            save_upscaled=sr_save_upscaled,
+            model_name=sr_model_name,
+            device="cuda:0",
+            prompt=sr_prompt,
+            negative_prompt=sr_negative_prompt,
+            num_inference_steps=sr_steps,
+            guidance_scale=sr_guidance_scale,
+            noise_level=sr_noise_level,
+            tile_size=sr_tile_size,
+            tile_overlap=sr_tile_overlap,
+            post_sharpen_percent=sr_post_sharpen_percent,
+            post_sharpen_radius=sr_post_sharpen_radius,
+            post_sharpen_threshold=sr_post_sharpen_threshold,
+        )
+        final_imgs = sr_processor.run(final_imgs)
+        print(
+            f"Applied IDU SR ({sr_method}, scale={sr_scale}, "
+            f"downsample_back={sr_downsample_back}) to {len(final_imgs)} images."
+        )
+
 
     depth_path = os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "render_depth")
     os.makedirs(depth_path, exist_ok=True)
@@ -760,7 +797,23 @@ def training_idu_episode(
         vggt_min_keep=opt.idu_vggt_min_keep,
         vggt_confidence_percentile=opt.idu_vggt_confidence_percentile,
         vggt_confidence_batch_size=opt.idu_vggt_confidence_batch_size,
-        vggt_confidence_input_size=opt.idu_vggt_confidence_input_size
+        vggt_confidence_input_size=opt.idu_vggt_confidence_input_size,
+        use_sr=opt.idu_use_sr,
+        sr_method=opt.idu_sr_method,
+        sr_scale=opt.idu_sr_scale,
+        sr_downsample_back=opt.idu_sr_downsample_back,
+        sr_save_upscaled=opt.idu_sr_save_upscaled,
+        sr_model_name=opt.idu_sr_model_name,
+        sr_prompt=opt.idu_sr_prompt,
+        sr_negative_prompt=opt.idu_sr_negative_prompt,
+        sr_steps=opt.idu_sr_steps,
+        sr_guidance_scale=opt.idu_sr_guidance_scale,
+        sr_noise_level=opt.idu_sr_noise_level,
+        sr_tile_size=opt.idu_sr_tile_size,
+        sr_tile_overlap=opt.idu_sr_tile_overlap,
+        sr_post_sharpen_percent=opt.idu_sr_post_sharpen_percent,
+        sr_post_sharpen_radius=opt.idu_sr_post_sharpen_radius,
+        sr_post_sharpen_threshold=opt.idu_sr_post_sharpen_threshold
     )
 
     # load Gaussians and scene

@@ -170,7 +170,7 @@ This stage refines the geometry and synthesizes high-quality textures using an i
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068_idu_test_5 \
+    -m ./outputs/JAX_idu/JAX_068_idu_test_sdx4 \
     --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
@@ -190,7 +190,7 @@ python train.py \
     --idu_render_size 1024 \
     --idu_flow_edit_n_min 4 \
     --idu_flow_edit_n_max 10 \
-    --idu_grid_size 10 \
+    --idu_grid_size 3 \
     --idu_grid_width 512 \
     --idu_grid_height 512 \
     --idu_episode_iterations 10000 \
@@ -199,14 +199,27 @@ python train.py \
     --lambda_pseudo_depth 0.5 \
     --idu_densify_until_iter 9000 \
     --idu_train_ratio 0.75 \
-    --idu_vggt_guided_sampling \
     --idu_depth_estimator moge \
-    --idu_vggt_model_name facebook/VGGT-1B \
-    --idu_vggt_candidate_multiplier 4 \
-    --idu_vggt_keep_ratio 0.5 \
-    --idu_vggt_min_keep 8 \
-    --idu_vggt_confidence_percentile 20 \
-    --idu_vggt_confidence_batch_size 4
+    --idu_use_sr \
+    --idu_sr_method sd-x4 \
+    --idu_sr_steps 30 \
+    --idu_sr_noise_level 30 \
+    --idu_sr_guidance_scale 2.0 \
+    --idu_sr_tile_size 256 \
+    --idu_sr_tile_overlap 32 \
+    --idu_sr_prompt "ultra sharp high resolution satellite image, crisp building edges, detailed rooftops, sharp roads, realistic urban textures, no blur" \
+    --idu_sr_negative_prompt "blur, low resolution, artifacts, distorted geometry, text, watermark, over-smoothed" \
+    --idu_sr_save_upscaled \
+    --idu_sr_post_sharpen_percent 120 \
+    --idu_sr_post_sharpen_radius 0.8 \
+    --idu_sr_post_sharpen_threshold 2 \
+    # --idu_vggt_guided_sampling \
+    # --idu_vggt_model_name facebook/VGGT-1B \
+    # --idu_vggt_candidate_multiplier 4 \
+    # --idu_vggt_keep_ratio 0.5 \
+    # --idu_vggt_min_keep 8 \
+    # --idu_vggt_confidence_percentile 20 \
+    # --idu_vggt_confidence_batch_size 4
 ```
 
 > If you use VGGT for pseudo depth in Stage 2, make sure VGGT dependencies are installed:
