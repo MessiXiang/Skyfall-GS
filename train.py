@@ -461,6 +461,246 @@ def _make_unique_idu_image_names(idu_cam_infos, elevation, radius):
         )
     return unique_cam_infos
 
+def _laplacian_sharpness(img):
+    img = np.asarray(img)
+    if img.dtype != np.float32:
+        img = img.astype(np.float32)
+    if img.max() > 1.5:
+        img = img / 255.0
+    if img.ndim == 3:
+        gray = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
+    else:
+        gray = img
+    gray_t = torch.from_numpy(gray).float()[None, None]
+    kernel = torch.tensor(
+        [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]],
+        dtype=torch.float32,
+    )[None, None]
+    lap = torch.nn.functional.conv2d(gray_t, kernel, padding=1)
+    return float(lap.var().item())
+
+def _build_knee_candidate_elevations(base_elevation, candidate_range, candidate_step, min_elevation, max_elevation):
+    candidate_step = max(1.0e-6, float(candidate_step))
+    offsets = np.arange(-float(candidate_range), float(candidate_range) + 0.5 * candidate_step, candidate_step)
+    candidates = sorted(
+        {
+            round(float(np.clip(base_elevation + offset, min_elevation, max_elevation)), 4)
+            for offset in offsets
+        },
+        reverse=True,
+    )
+    return candidates if candidates else [float(base_elevation)]
+
+def _build_global_knee_candidate_elevations(candidate_step, min_elevation, max_elevation):
+    candidate_step = max(1.0e-6, float(candidate_step))
+    candidates = sorted(
+        {
+            round(float(ele), 4)
+            for ele in np.arange(float(min_elevation), float(max_elevation) + 0.5 * candidate_step, candidate_step)
+            if float(min_elevation) <= float(ele) <= float(max_elevation)
+        },
+        reverse=True,
+    )
+    return candidates if candidates else [float(max_elevation)]
+
+def _select_knee_elevation_for_target(
+    target,
+    base_elevation,
+    radius,
+    candidate_elevations,
+    num_cams,
+    height,
+    width,
+    fov_x,
+    dataset,
+    gaussians,
+    pipeline,
+    background,
+    kernel_size,
+    idu_random_ap,
+    num_train_cams,
+    knee_render_size,
+    quality_alpha,
+    info_beta,
+    select_mode,
+    quality_threshold,
+    aggressive,
+):
+    candidate_infos = []
+    for ele in candidate_elevations:
+        candidate_infos += gen_idu_orbit_camera(
+            target,
+            ele,
+            radius,
+            num_cams,
+            1,
+            knee_render_size,
+            knee_render_size,
+            fov_x,
+            use_new_id=(not idu_random_ap),
+            num_train_cams=num_train_cams,
+        )
+
+    candidate_views = cameraList_from_camInfos(candidate_infos, 1, dataset, is_pseudo_cam=idu_random_ap)
+    candidate_imgs = render_idu_set(candidate_views, gaussians, pipeline, background, kernel_size, idu_random_ap)
+    sharpness = np.asarray([_laplacian_sharpness(img) for img in candidate_imgs], dtype=np.float32)
+    max_ele = max(candidate_elevations)
+    min_ele = min(candidate_elevations)
+    denom = max(max_ele - min_ele, 1.0e-6)
+    info_gain = np.asarray([(max_ele - ele) / denom for ele in candidate_elevations], dtype=np.float32)
+    info_gain = np.clip(info_gain, 1.0e-3, 1.0)
+
+    mode = (select_mode or "balance").lower()
+    sharpness_matrix = sharpness.reshape(len(candidate_elevations), num_cams)
+    selected_infos = []
+    selected_elevations = []
+    score_log = []
+    for cam_idx in range(num_cams):
+        cam_sharpness = sharpness_matrix[:, cam_idx]
+        max_sharpness = max(float(cam_sharpness.max()), 1.0e-8)
+        quality = np.clip(cam_sharpness / max_sharpness, 0.0, 1.0)
+        scores = (quality ** float(quality_alpha)) * (info_gain ** float(info_beta))
+        selected_idx = 0
+        if mode == "max_drop" and len(candidate_elevations) > 1:
+            drops = quality[:-1] - quality[1:]
+            drop_idx = int(np.argmax(drops))
+            selected_idx = drop_idx + (1 if aggressive else 0)
+        elif mode == "threshold":
+            below = np.where(quality < float(quality_threshold))[0]
+            if len(below) > 0:
+                selected_idx = int(below[0] if aggressive else max(0, below[0] - 1))
+            else:
+                selected_idx = int(np.argmax(scores))
+        else:
+            selected_idx = int(np.argmax(scores))
+
+        selected_elevation = float(candidate_elevations[selected_idx])
+        selected_cam = gen_idu_orbit_camera(
+            target,
+            selected_elevation,
+            radius,
+            num_cams,
+            1,
+            height,
+            width,
+            fov_x,
+            use_new_id=(not idu_random_ap),
+            num_train_cams=num_train_cams,
+        )[cam_idx]
+        selected_infos.append(selected_cam)
+        selected_elevations.append(selected_elevation)
+        score_log.append({
+            "cam_idx": cam_idx,
+            "selected_idx": selected_idx,
+            "selected_elevation": selected_elevation,
+            "quality": quality.tolist(),
+            "sharpness": cam_sharpness.tolist(),
+            "scores": scores.tolist(),
+        })
+
+    return selected_infos, selected_elevations, score_log
+
+def _generate_knee_guided_idu_cameras(
+    targets,
+    base_elevation,
+    radius,
+    idu_num_cams,
+    idu_num_samples_per_view,
+    height,
+    width,
+    fov_x,
+    dataset,
+    gaussians,
+    pipeline,
+    background,
+    kernel_size,
+    idu_random_ap,
+    num_train_cams,
+    candidate_range,
+    candidate_step,
+    use_global_range,
+    min_elevation,
+    max_elevation,
+    knee_render_size,
+    quality_alpha,
+    info_beta,
+    select_mode,
+    quality_threshold,
+    aggressive,
+    log_path,
+):
+    if use_global_range:
+        candidate_elevations = _build_global_knee_candidate_elevations(
+            candidate_step,
+            min_elevation,
+            max_elevation,
+        )
+        print(f"Knee-guided GLOBAL elevation candidates: {candidate_elevations}")
+    else:
+        candidate_elevations = _build_knee_candidate_elevations(
+            base_elevation,
+            candidate_range,
+            candidate_step,
+            min_elevation,
+            max_elevation,
+        )
+        print(f"Knee-guided local elevation candidates around {base_elevation}: {candidate_elevations}")
+    idu_cam_infos = []
+    selected_elevations = []
+    os.makedirs(log_path, exist_ok=True)
+    csv_path = os.path.join(log_path, "knee_selected_elevations.csv")
+    csv_rows = ["target_idx,cam_idx,base_elevation,selected_elevation,selected_idx,candidate_elevations,quality,sharpness,scores\n"]
+    for target_idx, target in enumerate(tqdm(targets, desc="Knee-guided elevation selection")):
+        selected_infos, selected_elevations_for_target, score_log = _select_knee_elevation_for_target(
+            target,
+            base_elevation,
+            radius,
+            candidate_elevations,
+            idu_num_cams,
+            height,
+            width,
+            fov_x,
+            dataset,
+            gaussians,
+            pipeline,
+            background,
+            kernel_size,
+            idu_random_ap,
+            num_train_cams,
+            knee_render_size,
+            quality_alpha,
+            info_beta,
+            select_mode,
+            quality_threshold,
+            aggressive,
+        )
+        selected_elevations.extend(selected_elevations_for_target)
+        for cam_info in selected_infos:
+            for _ in range(max(1, int(idu_num_samples_per_view))):
+                idu_cam_infos.append(cam_info)
+        print(
+            f"Target {target_idx:03d}: selected elevations "
+            f"{['%.2f' % e for e in selected_elevations_for_target]}"
+        )
+        for item in score_log:
+            csv_rows.append(
+                f"{target_idx},{item['cam_idx']},{base_elevation},{item['selected_elevation']},"
+                f"{item['selected_idx']},"
+                f"\"{'|'.join('%.4f' % e for e in candidate_elevations)}\","
+                f"\"{'|'.join('%.6f' % q for q in item['quality'])}\","
+                f"\"{'|'.join('%.8f' % s for s in item['sharpness'])}\","
+                f"\"{'|'.join('%.8f' % s for s in item['scores'])}\"\n"
+            )
+    if selected_elevations:
+        print(
+            f"Knee-guided elevation summary: min={min(selected_elevations):.2f}, "
+            f"max={max(selected_elevations):.2f}, mean={np.mean(selected_elevations):.2f}"
+        )
+    with open(csv_path, "w") as f:
+        f.writelines(csv_rows)
+    print(f"Saved knee-guided elevation debug log: {csv_path}")
+    return idu_cam_infos
+
 @torch.no_grad()
 def generate_idu_training_set(
     dataset : ModelParams,
@@ -487,7 +727,14 @@ def generate_idu_training_set(
     sr_steps: int=20, sr_guidance_scale: float=0.0, sr_noise_level: int=20,
     sr_tile_size: int=256, sr_tile_overlap: int=32,
     sr_post_sharpen_percent: int=80, sr_post_sharpen_radius: float=0.8,
-    sr_post_sharpen_threshold: int=2
+    sr_post_sharpen_threshold: int=2,
+    knee_elevation_sampling: bool=False, knee_candidate_range: float=10.0,
+    knee_candidate_step: float=5.0, knee_use_global_range: bool=False,
+    knee_quality_alpha: float=1.5,
+    knee_info_beta: float=1.0, knee_min_elevation: float=25.0,
+    knee_max_elevation: float=89.0, knee_render_size: int=256,
+    knee_select_mode: str="balance", knee_quality_threshold: float=0.65,
+    knee_aggressive: bool=False
 ):
 
     gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
@@ -517,7 +764,37 @@ def generate_idu_training_set(
     candidate_multiplier = max(1, int(vggt_candidate_multiplier)) if vggt_guided_sampling else 1
     candidate_idu_num_cams = max(1, int(idu_num_cams) * candidate_multiplier)
     candidate_num_samples_per_view = 1 if vggt_guided_sampling else idu_num_samples_per_view
-    if isinstance(elevation, list) and isinstance(radius, list):
+    if knee_elevation_sampling and not isinstance(elevation, list) and not isinstance(radius, list):
+        idu_cam_infos = _generate_knee_guided_idu_cameras(
+            targets,
+            elevation,
+            radius,
+            candidate_idu_num_cams,
+            candidate_num_samples_per_view,
+            height,
+            width,
+            fov_x,
+            dataset,
+            gaussians,
+            pipeline,
+            background,
+            kernel_size,
+            idu_random_ap,
+            (len(scene.getTrainCameras()) if idu_random_ap else None),
+            knee_candidate_range,
+            knee_candidate_step,
+            knee_use_global_range,
+            knee_min_elevation,
+            knee_max_elevation,
+            knee_render_size,
+            knee_quality_alpha,
+            knee_info_beta,
+            knee_select_mode,
+            knee_quality_threshold,
+            knee_aggressive,
+            os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "knee_elevation"),
+        )
+    elif isinstance(elevation, list) and isinstance(radius, list):
         assert len(elevation) == len(radius)
         assert idu_no_curriculum, "When using multiple elevations and radii, idu_no_curriculum must be set to True"
         for ele, rad in zip(elevation, radius):
@@ -813,7 +1090,19 @@ def training_idu_episode(
         sr_tile_overlap=opt.idu_sr_tile_overlap,
         sr_post_sharpen_percent=opt.idu_sr_post_sharpen_percent,
         sr_post_sharpen_radius=opt.idu_sr_post_sharpen_radius,
-        sr_post_sharpen_threshold=opt.idu_sr_post_sharpen_threshold
+        sr_post_sharpen_threshold=opt.idu_sr_post_sharpen_threshold,
+        knee_elevation_sampling=opt.idu_knee_elevation_sampling,
+        knee_candidate_range=opt.idu_knee_candidate_range,
+        knee_candidate_step=opt.idu_knee_candidate_step,
+        knee_use_global_range=opt.idu_knee_use_global_range,
+        knee_quality_alpha=opt.idu_knee_quality_alpha,
+        knee_info_beta=opt.idu_knee_info_beta,
+        knee_min_elevation=opt.idu_knee_min_elevation,
+        knee_max_elevation=opt.idu_knee_max_elevation,
+        knee_render_size=opt.idu_knee_render_size,
+        knee_select_mode=opt.idu_knee_select_mode,
+        knee_quality_threshold=opt.idu_knee_quality_threshold,
+        knee_aggressive=opt.idu_knee_aggressive
     )
 
     # load Gaussians and scene

@@ -243,6 +243,22 @@ class OptimizationParams(ParamGroup):
         self.idu_vggt_confidence_percentile: float = 20.0
         self.idu_vggt_confidence_input_size: int = 518
         self.idu_vggt_confidence_batch_size: int = 4
+
+        # Per-target/per-camera knee-guided elevation selection. When enabled,
+        # IDU keeps the curriculum base elevation but searches nearby candidate
+        # elevations and chooses the quality-information knee point per target.
+        self.idu_knee_elevation_sampling: bool = False
+        self.idu_knee_candidate_range: float = 10.0
+        self.idu_knee_candidate_step: float = 5.0
+        self.idu_knee_use_global_range: bool = False
+        self.idu_knee_quality_alpha: float = 1.5
+        self.idu_knee_info_beta: float = 1.0
+        self.idu_knee_min_elevation: float = 25.0
+        self.idu_knee_max_elevation: float = 89.0
+        self.idu_knee_render_size: int = 256
+        self.idu_knee_select_mode: str = "balance"  # [balance, max_drop, threshold]
+        self.idu_knee_quality_threshold: float = 0.65
+        self.idu_knee_aggressive: bool = False
         
         # Dataset configuration
         self.datasets_type: str = "jax_v1"

@@ -170,7 +170,7 @@ This stage refines the geometry and synthesizes high-quality textures using an i
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068_idu_test_sdx4 \
+    -m ./outputs/JAX_idu/JAX_068_idu_test_knee \
     --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
@@ -205,7 +205,7 @@ python train.py \
     --idu_sr_steps 30 \
     --idu_sr_noise_level 30 \
     --idu_sr_guidance_scale 2.0 \
-    --idu_sr_tile_size 256 \
+    --idu_sr_tile_size 1024 \
     --idu_sr_tile_overlap 32 \
     --idu_sr_prompt "ultra sharp high resolution satellite image, crisp building edges, detailed rooftops, sharp roads, realistic urban textures, no blur" \
     --idu_sr_negative_prompt "blur, low resolution, artifacts, distorted geometry, text, watermark, over-smoothed" \
@@ -213,6 +213,15 @@ python train.py \
     --idu_sr_post_sharpen_percent 120 \
     --idu_sr_post_sharpen_radius 0.8 \
     --idu_sr_post_sharpen_threshold 2 \
+    --idu_knee_elevation_sampling \
+    --idu_knee_use_global_range \
+    --idu_knee_min_elevation 20 \
+    --idu_knee_max_elevation 85 \
+    --idu_knee_candidate_step 5 \
+    --idu_knee_quality_alpha 3.0 \
+    --idu_knee_info_beta 0.8 \
+    --idu_knee_render_size 256 \
+    --idu_knee_select_mode balance \
     # --idu_vggt_guided_sampling \
     # --idu_vggt_model_name facebook/VGGT-1B \
     # --idu_vggt_candidate_multiplier 4 \

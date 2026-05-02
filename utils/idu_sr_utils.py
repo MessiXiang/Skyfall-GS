@@ -110,14 +110,15 @@ class PILSuperResolutionIDU:
 
             if self.downsample_back and up_img.size != orig_size:
                 out_img = up_img.resize(orig_size, self.resample)
-                out_img = _post_downsample_sharpen(
-                    out_img,
-                    self.post_sharpen_percent,
-                    self.post_sharpen_radius,
-                    self.post_sharpen_threshold,
-                )
             else:
                 out_img = up_img
+
+            out_img = _post_downsample_sharpen(
+                out_img,
+                self.post_sharpen_percent,
+                self.post_sharpen_radius,
+                self.post_sharpen_threshold,
+            )
 
             out_img.save(os.path.join(self.save_path, f"{idx:05d}.png"))
             sr_imgs.append(out_img)
