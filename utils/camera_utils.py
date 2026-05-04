@@ -137,6 +137,9 @@ def look_at_to_c2w(eye, target, up):
     # Calculate forward (negative z-axis)
     forward = target - eye
     forward = forward / np.linalg.norm(forward)
+
+    if abs(np.dot(forward, up) / (np.linalg.norm(up) + 1.0e-8)) > 0.999:
+        up = np.array([0, 1, 0])
     
     # Calculate right vector (x-axis)
     right = np.cross(forward, up)
@@ -174,7 +177,8 @@ def gen_idu_orbit_camera(
         width: int=512,
         fov: float=60.0,
         use_new_id: bool=True,
-        num_train_cams: int=None
+        num_train_cams: int=None,
+        azimuths: List[float]=None,
     ) -> List[CameraInfo]:
     # Convert target to numpy array
     target = np.array(target)
@@ -188,8 +192,11 @@ def gen_idu_orbit_camera(
     # Generate camera-to-world matrices
     c2ws = []
     uids = []
-    for i in range(num_cams):
-        theta = 2 * np.pi * i / num_cams + theta_offset
+    if azimuths is not None:
+        theta_values = [np.deg2rad(float(azimuth)) for azimuth in azimuths]
+    else:
+        theta_values = [2 * np.pi * i / num_cams + theta_offset for i in range(num_cams)]
+    for i, theta in enumerate(theta_values):
         phi = np.pi * elevation / 180
         eye = target + np.array([
             radius * np.cos(theta) * np.cos(phi),

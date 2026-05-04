@@ -43,6 +43,16 @@ from scene.dataset_readers import CameraInfo
 from PIL import Image
 from utils.idu_depth_utils import build_depth_estimator
 from utils.idu_sr_utils import build_super_resolution_processor
+from utils.idu_segformer_utils import (
+    LoveDASegFormer,
+    build_adaptive_targets_from_segmentation,
+    refine_loveda_segmentation_with_image,
+    save_adaptive_targets_overlay,
+    save_segmentation_map,
+    save_segmentation_overlay,
+    summarize_segmentation,
+    write_adaptive_targets_csv,
+)
 
 # fused SSIM, for faster training
 
@@ -62,6 +72,21 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 os.makedirs("./depth_tmp", exist_ok=True)
+
+def _idu_target_xyz(target_entry):
+    if isinstance(target_entry, dict):
+        return target_entry["target"]
+    return target_entry
+
+def _idu_target_radius(base_radius, target_entry):
+    if isinstance(target_entry, dict):
+        return float(base_radius) * float(target_entry.get("radius_scale", 1.0))
+    return float(base_radius)
+
+def _idu_target_azimuth(target_entry):
+    if isinstance(target_entry, dict):
+        return target_entry.get("azimuth", None)
+    return None
 
 @torch.no_grad()
 def create_offset_gt(image, offset):
@@ -368,6 +393,39 @@ def render_idu_set(views, gaussians, pipeline, background, kernel_size, idu_rand
         imgs.append(img)
     return imgs
 
+@torch.no_grad()
+def render_idu_set_with_coverage(views, gaussians, pipeline, background, kernel_size, idu_random_ap=False):
+    imgs = []
+    stats = []
+    for view in tqdm(views, desc="IDU coverage rendering progress"):
+        render_pkg = render(view, gaussians, pipeline, background, kernel_size=kernel_size, testing=(not idu_random_ap))
+        img = render_pkg["render"].cpu().numpy().transpose(1, 2, 0)
+        imgs.append(img)
+
+        alpha = render_pkg.get("render_alpha", None)
+        depth = render_pkg.get("render_depth", None)
+        if alpha is None:
+            alpha_valid_ratio = 1.0
+            alpha_mean = 1.0
+        else:
+            alpha_tensor = alpha.detach().float().clamp(0.0, 1.0)
+            alpha_valid_ratio = float((alpha_tensor > 0.15).float().mean().item())
+            alpha_mean = float(alpha_tensor.mean().item())
+        if depth is None:
+            depth_valid_ratio = 1.0
+        else:
+            depth_tensor = depth.detach().float()
+            depth_valid_ratio = float((torch.isfinite(depth_tensor) & (depth_tensor > 0.0)).float().mean().item())
+        coverage = alpha_valid_ratio * depth_valid_ratio
+        stats.append({
+            "alpha_valid_ratio": alpha_valid_ratio,
+            "alpha_mean": alpha_mean,
+            "depth_valid_ratio": depth_valid_ratio,
+            "coverage": coverage,
+            "missing": 1.0 - coverage,
+        })
+    return imgs, stats
+
 def _as_pil_image(img):
     if isinstance(img, Image.Image):
         return img.convert("RGB")
@@ -505,6 +563,7 @@ def _build_global_knee_candidate_elevations(candidate_step, min_elevation, max_e
 
 def _select_knee_elevation_for_target(
     target,
+    target_entry,
     base_elevation,
     radius,
     candidate_elevations,
@@ -525,6 +584,8 @@ def _select_knee_elevation_for_target(
     select_mode,
     quality_threshold,
     aggressive,
+    metric_mode,
+    missing_penalty,
 ):
     candidate_infos = []
     for ele in candidate_elevations:
@@ -542,8 +603,17 @@ def _select_knee_elevation_for_target(
         )
 
     candidate_views = cameraList_from_camInfos(candidate_infos, 1, dataset, is_pseudo_cam=idu_random_ap)
-    candidate_imgs = render_idu_set(candidate_views, gaussians, pipeline, background, kernel_size, idu_random_ap)
-    sharpness = np.asarray([_laplacian_sharpness(img) for img in candidate_imgs], dtype=np.float32)
+    metric_mode = (metric_mode or "coverage").lower()
+    if metric_mode == "sharpness":
+        candidate_imgs = render_idu_set(candidate_views, gaussians, pipeline, background, kernel_size, idu_random_ap)
+        metric_values = np.asarray([_laplacian_sharpness(img) for img in candidate_imgs], dtype=np.float32)
+        coverage_values = np.ones_like(metric_values, dtype=np.float32)
+        missing_values = np.zeros_like(metric_values, dtype=np.float32)
+    else:
+        candidate_imgs, coverage_stats = render_idu_set_with_coverage(candidate_views, gaussians, pipeline, background, kernel_size, idu_random_ap)
+        coverage_values = np.asarray([item["coverage"] for item in coverage_stats], dtype=np.float32)
+        missing_values = np.asarray([item["missing"] for item in coverage_stats], dtype=np.float32)
+        metric_values = coverage_values
     max_ele = max(candidate_elevations)
     min_ele = min(candidate_elevations)
     denom = max(max_ele - min_ele, 1.0e-6)
@@ -551,15 +621,20 @@ def _select_knee_elevation_for_target(
     info_gain = np.clip(info_gain, 1.0e-3, 1.0)
 
     mode = (select_mode or "balance").lower()
-    sharpness_matrix = sharpness.reshape(len(candidate_elevations), num_cams)
+    metric_matrix = metric_values.reshape(len(candidate_elevations), num_cams)
+    coverage_matrix = coverage_values.reshape(len(candidate_elevations), num_cams)
+    missing_matrix = missing_values.reshape(len(candidate_elevations), num_cams)
     selected_infos = []
     selected_elevations = []
     score_log = []
     for cam_idx in range(num_cams):
-        cam_sharpness = sharpness_matrix[:, cam_idx]
-        max_sharpness = max(float(cam_sharpness.max()), 1.0e-8)
-        quality = np.clip(cam_sharpness / max_sharpness, 0.0, 1.0)
-        scores = (quality ** float(quality_alpha)) * (info_gain ** float(info_beta))
+        target_azimuth = _idu_target_azimuth(target_entry)
+        cam_metric = metric_matrix[:, cam_idx]
+        cam_coverage = coverage_matrix[:, cam_idx]
+        cam_missing = missing_matrix[:, cam_idx]
+        max_metric = max(float(cam_metric.max()), 1.0e-8)
+        quality = np.clip(cam_metric / max_metric, 0.0, 1.0)
+        scores = (quality ** float(quality_alpha)) * (info_gain ** float(info_beta)) - float(missing_penalty) * cam_missing
         selected_idx = 0
         if mode == "max_drop" and len(candidate_elevations) > 1:
             drops = quality[:-1] - quality[1:]
@@ -587,6 +662,20 @@ def _select_knee_elevation_for_target(
             use_new_id=(not idu_random_ap),
             num_train_cams=num_train_cams,
         )[cam_idx]
+        if target_azimuth is not None:
+            selected_cam = gen_idu_orbit_camera(
+                target,
+                selected_elevation,
+                radius,
+                1,
+                1,
+                height,
+                width,
+                fov_x,
+                use_new_id=(not idu_random_ap),
+                num_train_cams=num_train_cams,
+                azimuths=[float(target_azimuth)],
+            )[0]
         selected_infos.append(selected_cam)
         selected_elevations.append(selected_elevation)
         score_log.append({
@@ -594,7 +683,9 @@ def _select_knee_elevation_for_target(
             "selected_idx": selected_idx,
             "selected_elevation": selected_elevation,
             "quality": quality.tolist(),
-            "sharpness": cam_sharpness.tolist(),
+            "metric": cam_metric.tolist(),
+            "coverage": cam_coverage.tolist(),
+            "missing": cam_missing.tolist(),
             "scores": scores.tolist(),
         })
 
@@ -627,6 +718,8 @@ def _generate_knee_guided_idu_cameras(
     select_mode,
     quality_threshold,
     aggressive,
+    metric_mode,
+    missing_penalty,
     log_path,
 ):
     if use_global_range:
@@ -649,12 +742,15 @@ def _generate_knee_guided_idu_cameras(
     selected_elevations = []
     os.makedirs(log_path, exist_ok=True)
     csv_path = os.path.join(log_path, "knee_selected_elevations.csv")
-    csv_rows = ["target_idx,cam_idx,base_elevation,selected_elevation,selected_idx,candidate_elevations,quality,sharpness,scores\n"]
-    for target_idx, target in enumerate(tqdm(targets, desc="Knee-guided elevation selection")):
+    csv_rows = ["target_idx,cam_idx,base_elevation,selected_elevation,selected_idx,candidate_elevations,quality,coverage,missing,metric,scores\n"]
+    for target_idx, target_entry in enumerate(tqdm(targets, desc="Knee-guided elevation selection")):
+        target = _idu_target_xyz(target_entry)
+        target_radius = _idu_target_radius(radius, target_entry)
         selected_infos, selected_elevations_for_target, score_log = _select_knee_elevation_for_target(
             target,
+            target_entry,
             base_elevation,
-            radius,
+            target_radius,
             candidate_elevations,
             idu_num_cams,
             height,
@@ -673,6 +769,8 @@ def _generate_knee_guided_idu_cameras(
             select_mode,
             quality_threshold,
             aggressive,
+            metric_mode,
+            missing_penalty,
         )
         selected_elevations.extend(selected_elevations_for_target)
         for cam_info in selected_infos:
@@ -688,7 +786,9 @@ def _generate_knee_guided_idu_cameras(
                 f"{item['selected_idx']},"
                 f"\"{'|'.join('%.4f' % e for e in candidate_elevations)}\","
                 f"\"{'|'.join('%.6f' % q for q in item['quality'])}\","
-                f"\"{'|'.join('%.8f' % s for s in item['sharpness'])}\","
+                f"\"{'|'.join('%.6f' % c for c in item['coverage'])}\","
+                f"\"{'|'.join('%.6f' % m for m in item['missing'])}\","
+                f"\"{'|'.join('%.8f' % s for s in item['metric'])}\","
                 f"\"{'|'.join('%.8f' % s for s in item['scores'])}\"\n"
             )
     if selected_elevations:
@@ -734,7 +834,8 @@ def generate_idu_training_set(
     knee_info_beta: float=1.0, knee_min_elevation: float=25.0,
     knee_max_elevation: float=89.0, knee_render_size: int=256,
     knee_select_mode: str="balance", knee_quality_threshold: float=0.65,
-    knee_aggressive: bool=False
+    knee_aggressive: bool=False,
+    knee_metric_mode: str="coverage", knee_missing_penalty: float=0.35
 ):
 
     gaussians = GaussianModel(dataset.sh_degree, dataset.appearance_enabled, dataset.appearance_n_fourier_freqs, dataset.appearance_embedding_dim)
@@ -762,7 +863,9 @@ def generate_idu_training_set(
 
     idu_cam_infos = []
     candidate_multiplier = max(1, int(vggt_candidate_multiplier)) if vggt_guided_sampling else 1
-    candidate_idu_num_cams = max(1, int(idu_num_cams) * candidate_multiplier)
+    adaptive_single_camera_targets = any(isinstance(target_entry, dict) and "azimuth" in target_entry for target_entry in targets)
+    base_idu_num_cams = 1 if adaptive_single_camera_targets else int(idu_num_cams)
+    candidate_idu_num_cams = max(1, base_idu_num_cams * candidate_multiplier)
     candidate_num_samples_per_view = 1 if vggt_guided_sampling else idu_num_samples_per_view
     if knee_elevation_sampling and not isinstance(elevation, list) and not isinstance(radius, list):
         idu_cam_infos = _generate_knee_guided_idu_cameras(
@@ -792,17 +895,21 @@ def generate_idu_training_set(
             knee_select_mode,
             knee_quality_threshold,
             knee_aggressive,
+            knee_metric_mode,
+            knee_missing_penalty,
             os.path.join(dataset.model_path, "idu", f"e{elevation}_r{radius}", "knee_elevation"),
         )
     elif isinstance(elevation, list) and isinstance(radius, list):
         assert len(elevation) == len(radius)
         assert idu_no_curriculum, "When using multiple elevations and radii, idu_no_curriculum must be set to True"
         for ele, rad in zip(elevation, radius):
-            for target in targets:
+            for target_entry in targets:
+                target = _idu_target_xyz(target_entry)
+                target_radius = _idu_target_radius(rad, target_entry)
                 idu_cam_infos += gen_idu_orbit_camera(
                     target,
                     ele,
-                    rad,
+                    target_radius,
                     candidate_idu_num_cams,
                     candidate_num_samples_per_view,
                     height,
@@ -813,18 +920,21 @@ def generate_idu_training_set(
         idu_cam_infos = random.sample(idu_cam_infos, num_cams // len(elevation))
         print("Warning! Sampling a subset of cameras for each elevation/radius pair")
     else:
-        for target in targets:
+        for target_entry in targets:
+            target = _idu_target_xyz(target_entry)
+            target_radius = _idu_target_radius(radius, target_entry)
             idu_cam_infos += gen_idu_orbit_camera(
                 target,
                 elevation,
-                radius,
+                target_radius,
                 candidate_idu_num_cams,
                 candidate_num_samples_per_view,
                 height,
                 width,
                 fov_x,
                 use_new_id=(not idu_random_ap),
-                num_train_cams=(len(scene.getTrainCameras()) if idu_random_ap else None)
+                num_train_cams=(len(scene.getTrainCameras()) if idu_random_ap else None),
+                azimuths=([float(_idu_target_azimuth(target_entry))] if _idu_target_azimuth(target_entry) is not None else None),
             )
     idu_cam_infos = _make_unique_idu_image_names(idu_cam_infos, elevation, radius)
     print(f"Generated {len(idu_cam_infos)} IDU cameras")
@@ -1102,7 +1212,9 @@ def training_idu_episode(
         knee_render_size=opt.idu_knee_render_size,
         knee_select_mode=opt.idu_knee_select_mode,
         knee_quality_threshold=opt.idu_knee_quality_threshold,
-        knee_aggressive=opt.idu_knee_aggressive
+        knee_aggressive=opt.idu_knee_aggressive,
+        knee_metric_mode=opt.idu_knee_metric_mode,
+        knee_missing_penalty=opt.idu_knee_missing_penalty,
     )
 
     # load Gaussians and scene
@@ -1425,15 +1537,7 @@ def training_idu(dataset, opt, pipe, init_checkpoint_path):
     print(f"Elevation List: {opt.idu_elevation_list}")
     print(f"FOV: {opt.idu_fov}")
     print("======================")
-    # generate targets
-    x = np.linspace(-opt.idu_grid_width/2, opt.idu_grid_width/2, opt.idu_grid_size+2)
-    y = np.linspace(-opt.idu_grid_height/2, opt.idu_grid_height/2, opt.idu_grid_size+2)
-    # remove border
-    x = x[1:-1]
-    y = y[1:-1]
-    xx, yy = np.meshgrid(x, y)
-    targets = np.stack([xx, yy, np.zeros_like(xx)], axis=-1).reshape(-1, 3).tolist()
-    assert len(targets) == opt.idu_grid_size * opt.idu_grid_size
+    targets = generate_idu_targets(dataset, opt, pipe, init_checkpoint_path)
     if not opt.idu_no_curriculum:
         
         for radius, elevation in zip(opt.idu_radius_list, opt.idu_elevation_list):
@@ -1459,6 +1563,130 @@ def training_idu(dataset, opt, pipe, init_checkpoint_path):
                 idu_num_samples_per_view=opt.idu_num_samples_per_view
             )
         
+
+def generate_regular_idu_targets(opt):
+    x = np.linspace(-opt.idu_grid_width / 2, opt.idu_grid_width / 2, opt.idu_grid_size + 2)
+    y = np.linspace(-opt.idu_grid_height / 2, opt.idu_grid_height / 2, opt.idu_grid_size + 2)
+    x = x[1:-1]
+    y = y[1:-1]
+    xx, yy = np.meshgrid(x, y)
+    targets = np.stack([xx, yy, np.zeros_like(xx)], axis=-1).reshape(-1, 3).tolist()
+    assert len(targets) == opt.idu_grid_size * opt.idu_grid_size
+    return targets
+
+@torch.no_grad()
+def render_idu_zenith_overview(dataset, opt, pipe, checkpoint_path):
+    gaussians = GaussianModel(
+        dataset.sh_degree,
+        dataset.appearance_enabled,
+        dataset.appearance_n_fourier_freqs,
+        dataset.appearance_embedding_dim,
+    )
+    print(f"Loading model for IDU adaptive overview from checkpoint {checkpoint_path}")
+    model_params, first_iter = torch.load(checkpoint_path, weights_only=False)
+    gaussians.load_from_checkpoints(model_params)
+    scene = Scene(dataset, gaussians, load_iteration=first_iter, shuffle=False, ply_path=os.path.dirname(checkpoint_path))
+    del scene
+
+    xyz = gaussians.get_xyz.detach()
+    if xyz.numel() == 0:
+        raise RuntimeError("Cannot render IDU adaptive overview: Gaussian model has no points.")
+    mins = xyz.min(dim=0).values.detach().cpu().numpy()
+    maxs = xyz.max(dim=0).values.detach().cpu().numpy()
+    center = (mins + maxs) * 0.5
+    extent_xy = max(float(maxs[0] - mins[0]), float(maxs[1] - mins[1]), 1.0)
+    target = [float(center[0]), float(center[1]), float(center[2])]
+    radius = max(float(opt.idu_adaptive_overview_radius), extent_xy * float(opt.idu_adaptive_overview_radius_scale))
+    fov = float(opt.idu_adaptive_overview_fov)
+    overview_cam_info = gen_idu_orbit_camera(
+        target,
+        elevation=90.0,
+        radius=radius,
+        num_cams=1,
+        num_samples=1,
+        height=int(opt.idu_adaptive_seg_render_size),
+        width=int(opt.idu_adaptive_seg_render_size),
+        fov=fov,
+    )[0]
+    overview_cam = cameraList_from_camInfos([overview_cam_info], 1, dataset)[0]
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    rendered = render(
+        overview_cam,
+        gaussians,
+        pipe,
+        background,
+        kernel_size=dataset.kernel_size,
+        testing=True,
+    )["render"]
+    image = to_pil_image(rendered.detach().cpu().clamp(0.0, 1.0))
+    world_bounds_xy = (float(mins[0]), float(maxs[0]), float(mins[1]), float(maxs[1]))
+    del gaussians
+    torch.cuda.empty_cache()
+    return image, world_bounds_xy
+
+def generate_idu_targets(dataset, opt, pipe, checkpoint_path):
+    if not opt.idu_adaptive_segformer_sampling:
+        return generate_regular_idu_targets(opt)
+
+    adaptive_dir = os.path.join(dataset.model_path, "idu", "adaptive_segformer")
+    os.makedirs(adaptive_dir, exist_ok=True)
+    overview_img, world_bounds_xy = render_idu_zenith_overview(dataset, opt, pipe, checkpoint_path)
+    overview_path = os.path.join(adaptive_dir, "zenith_overview.png")
+    overview_img.save(overview_path)
+    print(f"Saved IDU adaptive zenith overview: {overview_path}")
+    print(
+        "IDU adaptive world bounds xy: "
+        f"min_x={world_bounds_xy[0]:.3f}, max_x={world_bounds_xy[1]:.3f}, "
+        f"min_y={world_bounds_xy[2]:.3f}, max_y={world_bounds_xy[3]:.3f}"
+    )
+
+    segmenter = LoveDASegFormer(opt.idu_segformer_model_name, device="cuda:0")
+    seg_map = segmenter.predict(overview_img)
+    raw_seg_map = seg_map
+    seg_map = refine_loveda_segmentation_with_image(overview_img, raw_seg_map)
+    del segmenter
+    torch.cuda.empty_cache()
+
+    save_segmentation_map(raw_seg_map, os.path.join(adaptive_dir, "segmentation_loveda_raw.png"))
+    save_segmentation_map(seg_map, os.path.join(adaptive_dir, "segmentation_loveda.png"))
+    save_segmentation_overlay(overview_img, seg_map, os.path.join(adaptive_dir, "segmentation_overlay.png"))
+    seg_summary = summarize_segmentation(seg_map)
+    print(f"IDU adaptive SegFormer label pixels: {seg_summary}")
+    targets, summary = build_adaptive_targets_from_segmentation(
+        seg_map,
+        grid_width=opt.idu_grid_width,
+        grid_height=opt.idu_grid_height,
+        grid_size=opt.idu_grid_size,
+        building_subdivisions=opt.idu_adaptive_building_subdivisions,
+        other_subdivisions=opt.idu_adaptive_other_subdivisions,
+        building_radius_scale=opt.idu_adaptive_building_radius_scale,
+        other_radius_scale=opt.idu_adaptive_other_radius_scale,
+        world_bounds_xy=world_bounds_xy,
+        max_targets=opt.idu_adaptive_max_targets,
+        fine_grid_multiplier=opt.idu_adaptive_fine_grid_multiplier,
+        fine_grid_size=opt.idu_adaptive_fine_grid_size,
+        coverage_cells=opt.idu_adaptive_coverage_cells,
+        building_weight=opt.idu_adaptive_building_weight,
+        road_weight=opt.idu_adaptive_road_weight,
+        wild_weight=opt.idu_adaptive_wild_weight,
+        nms_radius_cells=opt.idu_adaptive_nms_radius_cells,
+    )
+    write_adaptive_targets_csv(targets, os.path.join(adaptive_dir, "adaptive_targets.csv"))
+    fine_grid_size = max(opt.idu_grid_size, int(opt.idu_adaptive_fine_grid_size))
+    save_adaptive_targets_overlay(
+        overview_img,
+        targets,
+        os.path.join(adaptive_dir, "adaptive_targets_overlay.png"),
+        grid_size=opt.idu_grid_size,
+        fine_grid_size=fine_grid_size,
+    )
+    print(
+        "IDU adaptive SegFormer targets: "
+        f"total={len(targets)}, building={summary.get('building', 0)}, "
+        f"road={summary.get('road', 0)}, wild={summary.get('wild', 0)}"
+    )
+    return targets
 
 
 def depth_loss_func(gt_depth, depth):

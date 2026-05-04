@@ -259,6 +259,8 @@ class OptimizationParams(ParamGroup):
         self.idu_knee_select_mode: str = "balance"  # [balance, max_drop, threshold]
         self.idu_knee_quality_threshold: float = 0.65
         self.idu_knee_aggressive: bool = False
+        self.idu_knee_metric_mode: str = "coverage"  # [coverage, sharpness]
+        self.idu_knee_missing_penalty: float = 0.35
         
         # Dataset configuration
         self.datasets_type: str = "jax_v1"
@@ -306,6 +308,28 @@ class OptimizationParams(ParamGroup):
         self.idu_grid_width: int = 256
         self.idu_grid_height: int = 256
         self.idu_grid_size: int = 2
+
+        # SegFormer-guided adaptive IDU target distribution. This runs once
+        # before IDU starts: render a 90-degree zenith overview, segment it,
+        # and place denser look-at targets over building regions.
+        self.idu_adaptive_segformer_sampling: bool = False
+        self.idu_segformer_model_name: str = "wu-pr-gw/segformer-b2-finetuned-with-LoveDA"
+        self.idu_adaptive_seg_render_size: int = 1024
+        self.idu_adaptive_overview_fov: float = 70.0
+        self.idu_adaptive_overview_radius: float = 1.0
+        self.idu_adaptive_overview_radius_scale: float = 0.65
+        self.idu_adaptive_building_subdivisions: int = 2
+        self.idu_adaptive_other_subdivisions: int = 1
+        self.idu_adaptive_building_radius_scale: float = 0.85
+        self.idu_adaptive_other_radius_scale: float = 1.0
+        self.idu_adaptive_max_targets: int = 64
+        self.idu_adaptive_fine_grid_multiplier: int = 3
+        self.idu_adaptive_fine_grid_size: int = 256
+        self.idu_adaptive_coverage_cells: int = 20
+        self.idu_adaptive_building_weight: float = 1.0
+        self.idu_adaptive_road_weight: float = 0.3
+        self.idu_adaptive_wild_weight: float = 0.1
+        self.idu_adaptive_nms_radius_cells: int = 10
     
     def _init_ddim_params(self):
         """Initialize DDIM inversion parameters."""

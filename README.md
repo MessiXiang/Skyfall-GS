@@ -170,7 +170,7 @@ This stage refines the geometry and synthesizes high-quality textures using an i
 ```bash
 python train.py \
     -s ./data/datasets_JAX/JAX_068/ \
-    -m ./outputs/JAX_idu/JAX_068_idu_test_knee \
+    -m ./outputs/JAX_idu/JAX_068_idu_adaptive_segformer_knee \
     --start_checkpoint ./outputs/JAX/JAX_068/chkpnt30000.pth \
     --iterative_datasets_update \
     --eval \
@@ -185,14 +185,29 @@ python train.py \
     --idu_refine \
     --idu_num_samples_per_view 2 \
     --densify_grad_threshold 0.0002 \
-    --idu_num_cams 6 \
     --idu_use_flow_edit \
     --idu_render_size 1024 \
     --idu_flow_edit_n_min 4 \
     --idu_flow_edit_n_max 10 \
-    --idu_grid_size 3 \
     --idu_grid_width 512 \
     --idu_grid_height 512 \
+    --idu_adaptive_segformer_sampling \
+    --idu_segformer_model_name wu-pr-gw/segformer-b2-finetuned-with-LoveDA \
+    --idu_adaptive_seg_render_size 1024 \
+    --idu_adaptive_overview_fov 70 \
+    --idu_adaptive_overview_radius 1.0 \
+    --idu_adaptive_overview_radius_scale 0.65 \
+    --idu_adaptive_building_subdivisions 2 \
+    --idu_adaptive_other_subdivisions 1 \
+    --idu_adaptive_building_radius_scale 0.85 \
+    --idu_adaptive_other_radius_scale 1.0 \
+    --idu_adaptive_max_targets 64 \
+    --idu_adaptive_fine_grid_size 256 \
+    --idu_adaptive_coverage_cells 20 \
+    --idu_adaptive_building_weight 1.0 \
+    --idu_adaptive_road_weight 0.3 \
+    --idu_adaptive_wild_weight 0.1 \
+    --idu_adaptive_nms_radius_cells 10 \
     --idu_episode_iterations 10000 \
     --idu_iter_full_train 0 \
     --idu_opacity_cooling_iterations 500 \
@@ -207,8 +222,8 @@ python train.py \
     --idu_sr_guidance_scale 2.0 \
     --idu_sr_tile_size 1024 \
     --idu_sr_tile_overlap 32 \
-    --idu_sr_prompt "ultra sharp high resolution satellite image, crisp building edges, detailed rooftops, sharp roads, realistic urban textures, no blur" \
-    --idu_sr_negative_prompt "blur, low resolution, artifacts, distorted geometry, text, watermark, over-smoothed" \
+    --idu_sr_prompt "ultra sharp high resolution satellite image, crisp building edges, detailed rooftops, sharp roads, realistic urban textures, no blur, no motion blur, properly sharpened" \
+    --idu_sr_negative_prompt "blur, motion blur, low resolution, artifacts, distorted geometry, text, watermark, over-smoothed, over-sharpened" \
     --idu_sr_save_upscaled \
     --idu_sr_post_sharpen_percent 120 \
     --idu_sr_post_sharpen_radius 0.8 \
@@ -222,6 +237,8 @@ python train.py \
     --idu_knee_info_beta 0.8 \
     --idu_knee_render_size 256 \
     --idu_knee_select_mode balance \
+    --idu_knee_metric_mode coverage \
+    --idu_knee_missing_penalty 1.5 \
     # --idu_vggt_guided_sampling \
     # --idu_vggt_model_name facebook/VGGT-1B \
     # --idu_vggt_candidate_multiplier 4 \
