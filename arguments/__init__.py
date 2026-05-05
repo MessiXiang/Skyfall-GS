@@ -330,6 +330,8 @@ class OptimizationParams(ParamGroup):
         self.idu_adaptive_road_weight: float = 0.3
         self.idu_adaptive_wild_weight: float = 0.1
         self.idu_adaptive_nms_radius_cells: int = 10
+        self.idu_adaptive_building_four_direction_views: bool = False
+        self.idu_adaptive_building_direction_azimuths: str = "0,90,180,270"
     
     def _init_ddim_params(self):
         """Initialize DDIM inversion parameters."""

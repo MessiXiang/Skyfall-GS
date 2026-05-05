@@ -292,6 +292,8 @@ def build_adaptive_targets_from_segmentation(
     road_weight: float = 0.3,
     wild_weight: float = 0.1,
     nms_radius_cells: int = 12,
+    building_four_direction_views: bool = False,
+    building_direction_azimuths: Optional[List[float]] = None,
 ) -> Tuple[List[Dict], Dict[str, int]]:
     h, w = seg_map.shape[:2]
     grid_size = max(1, int(grid_size))
@@ -406,6 +408,28 @@ def build_adaptive_targets_from_segmentation(
             remaining_weight[nms_mask] = 0.0
 
     selected.sort(key=lambda item: (item["grid_xy"][1], item["grid_xy"][0]))
+    if building_four_direction_views:
+        if building_direction_azimuths is None:
+            building_direction_azimuths = [0.0, 90.0, 180.0, 270.0]
+        # These azimuths are camera-position azimuths around the building target.
+        # gen_idu_orbit_camera places the camera at target + offset(azimuth)
+        # and always calls look_at_to_c2w(eye, target), so every expanded view
+        # is a camera around the building looking inward at the building.
+        direction_azimuths = [float(azimuth) % 360.0 for azimuth in building_direction_azimuths]
+        expanded = []
+        for parent_idx, item in enumerate(selected):
+            if item.get("region_type") != "building":
+                expanded.append(item)
+                continue
+            for direction_idx, azimuth in enumerate(direction_azimuths):
+                direction_item = dict(item)
+                direction_item["azimuth"] = float(azimuth)
+                direction_item["direction_idx"] = int(direction_idx)
+                direction_item["direction_azimuth"] = float(azimuth)
+                direction_item["parent_target_idx"] = int(parent_idx)
+                expanded.append(direction_item)
+        selected = expanded
+
     summary = {"building": 0, "road": 0, "wild": 0}
     for item in selected:
         summary[item["region_type"]] += 1
@@ -416,7 +440,7 @@ def build_adaptive_targets_from_segmentation(
 def write_adaptive_targets_csv(target_entries: List[Dict], output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
-        f.write("idx,x,y,z,region_type,radius_scale,azimuth,grid_x,grid_y,score,coverage_cells,building_ratio,road_ratio,wild_ratio,dominant_label,min_x,max_x,min_y,max_y\n")
+        f.write("idx,x,y,z,region_type,radius_scale,azimuth,direction_idx,direction_azimuth,parent_target_idx,grid_x,grid_y,score,coverage_cells,building_ratio,road_ratio,wild_ratio,dominant_label,min_x,max_x,min_y,max_y\n")
         for idx, item in enumerate(target_entries):
             ratios = item.get("ratios", {})
             target = item["target"]
@@ -426,6 +450,9 @@ def write_adaptive_targets_csv(target_entries: List[Dict], output_path: str):
                 f"{idx},{target[0]},{target[1]},{target[2]},"
                 f"{item.get('region_type', 'unknown')},{item.get('radius_scale', 1.0)},"
                 f"{item.get('azimuth', '')},"
+                f"{item.get('direction_idx', '')},"
+                f"{item.get('direction_azimuth', '')},"
+                f"{item.get('parent_target_idx', '')},"
                 f"{grid_xy[0]},{grid_xy[1]},"
                 f"{item.get('score', 0.0):.6f},"
                 f"{item.get('coverage_cells', 0)},"

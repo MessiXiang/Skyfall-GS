@@ -88,6 +88,11 @@ def _idu_target_azimuth(target_entry):
         return target_entry.get("azimuth", None)
     return None
 
+def _parse_adaptive_building_direction_azimuths(value):
+    if isinstance(value, (list, tuple)):
+        return [float(v) % 360.0 for v in value]
+    return [float(v.strip()) % 360.0 for v in str(value).split(",") if v.strip()]
+
 @torch.no_grad()
 def create_offset_gt(image, offset):
     height, width = image.shape[1:]
@@ -588,6 +593,8 @@ def _select_knee_elevation_for_target(
     missing_penalty,
 ):
     candidate_infos = []
+    target_azimuth = _idu_target_azimuth(target_entry)
+    fixed_azimuths = [float(target_azimuth)] if target_azimuth is not None else None
     for ele in candidate_elevations:
         candidate_infos += gen_idu_orbit_camera(
             target,
@@ -600,6 +607,7 @@ def _select_knee_elevation_for_target(
             fov_x,
             use_new_id=(not idu_random_ap),
             num_train_cams=num_train_cams,
+            azimuths=fixed_azimuths,
         )
 
     candidate_views = cameraList_from_camInfos(candidate_infos, 1, dataset, is_pseudo_cam=idu_random_ap)
@@ -628,7 +636,6 @@ def _select_knee_elevation_for_target(
     selected_elevations = []
     score_log = []
     for cam_idx in range(num_cams):
-        target_azimuth = _idu_target_azimuth(target_entry)
         cam_metric = metric_matrix[:, cam_idx]
         cam_coverage = coverage_matrix[:, cam_idx]
         cam_missing = missing_matrix[:, cam_idx]
@@ -722,22 +729,29 @@ def _generate_knee_guided_idu_cameras(
     missing_penalty,
     log_path,
 ):
+    effective_min_elevation = max(float(min_elevation), float(base_elevation) - 20.0)
     if use_global_range:
         candidate_elevations = _build_global_knee_candidate_elevations(
             candidate_step,
-            min_elevation,
+            effective_min_elevation,
             max_elevation,
         )
-        print(f"Knee-guided GLOBAL elevation candidates: {candidate_elevations}")
+        print(
+            f"Knee-guided GLOBAL elevation candidates: {candidate_elevations} "
+            f"(min limited to max({min_elevation}, base_elevation - 20) = {effective_min_elevation})"
+        )
     else:
         candidate_elevations = _build_knee_candidate_elevations(
             base_elevation,
             candidate_range,
             candidate_step,
-            min_elevation,
+            effective_min_elevation,
             max_elevation,
         )
-        print(f"Knee-guided local elevation candidates around {base_elevation}: {candidate_elevations}")
+        print(
+            f"Knee-guided local elevation candidates around {base_elevation}: {candidate_elevations} "
+            f"(min limited to max({min_elevation}, base_elevation - 20) = {effective_min_elevation})"
+        )
     idu_cam_infos = []
     selected_elevations = []
     os.makedirs(log_path, exist_ok=True)
@@ -1671,6 +1685,8 @@ def generate_idu_targets(dataset, opt, pipe, checkpoint_path):
         road_weight=opt.idu_adaptive_road_weight,
         wild_weight=opt.idu_adaptive_wild_weight,
         nms_radius_cells=opt.idu_adaptive_nms_radius_cells,
+        building_four_direction_views=opt.idu_adaptive_building_four_direction_views,
+        building_direction_azimuths=_parse_adaptive_building_direction_azimuths(opt.idu_adaptive_building_direction_azimuths),
     )
     write_adaptive_targets_csv(targets, os.path.join(adaptive_dir, "adaptive_targets.csv"))
     fine_grid_size = max(opt.idu_grid_size, int(opt.idu_adaptive_fine_grid_size))
