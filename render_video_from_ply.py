@@ -305,7 +305,7 @@ def render_set_from_ply(ply_path, camera_path_name, views, pipeline, background,
 class PipelineParams:
     """Minimal pipeline parameters for rendering."""
     def __init__(self):
-        self.convert_SHs_python = False
+        self.convert_SHs_python = True
         self.compute_cov3D_python = False
         self.debug = False
 
@@ -333,6 +333,9 @@ def render_video_from_ply(ply_path: str, camera_path: str, output_path: str = No
 
     # Setup pipeline
     pipeline = PipelineParams()
+    if kernel_size <= 0:
+        print("kernel_size <= 0, using vanilla 3DGS-style rendering without 3D filter")
+        kernel_size = 0.0
 
     # Background color
     bg_color = [1, 1, 1] if white_background else [0, 0, 0]
@@ -370,7 +373,8 @@ def render_video_from_ply(ply_path: str, camera_path: str, output_path: str = No
     cam_infos = cameraList_from_camInfos(cams, 1.0, minimal_args, is_testing=True)
 
     # Render frames
-    imgs = render_set_from_ply(ply_path, camera_path_name, cam_infos, pipeline, background, kernel_size, 1.0, depth, sh_degree, cameras=cam_infos)
+    filter_cameras = cam_infos if kernel_size > 0 else None
+    imgs = render_set_from_ply(ply_path, camera_path_name, cam_infos, pipeline, background, kernel_size, 1.0, depth, sh_degree, cameras=filter_cameras)
 
     # Save individual frames if requested
     if save_images:

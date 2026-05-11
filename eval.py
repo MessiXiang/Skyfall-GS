@@ -6,8 +6,8 @@ Usage:
 python eval.py \
     --data_dir results_eval/data_eval_JAX \
     --temp_dir /root/autodl-tmp/temp_dir \
-    --methods mip-splatting sat-nerf eogs corgs ours_stage1 ours_stage2 my_method_vggt_sample \
-    --output_file metrics_results_JAX.csv \
+    --methods  ablation_angle_only ablation_position_only ablation_both_no \
+    --output_file metrics_results_ablation.csv \
     --frame_rate 30 \
     --resolution 1024 \
     --batch_size 64 

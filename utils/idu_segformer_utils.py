@@ -209,19 +209,13 @@ def save_adaptive_targets_overlay(
         draw.line([(x, 0), (x, height)], fill=(0, 255, 255, 120), width=2)
         draw.line([(0, y), (width, y)], fill=(0, 255, 255, 120), width=2)
 
-    color_by_type = {
-        "building": (255, 40, 40, 190),
-        "road": (255, 255, 255, 190),
-        "wild": (0, 220, 80, 190),
-    }
-    for idx, item in enumerate(target_entries):
+    target_fill = (255, 40, 40, 220)
+    for item in target_entries:
         gx, gy = item.get("grid_xy", [0, 0])
         x0 = gx * width / fine_grid_size
         y0 = gy * height / fine_grid_size
         x1 = (gx + 1) * width / fine_grid_size
         y1 = (gy + 1) * height / fine_grid_size
-        fill = color_by_type.get(item.get("region_type"), (255, 255, 0, 190))
-        draw.rectangle([x0, y0, x1, y1], outline=fill, width=3)
         fine_xy = item.get("fine_xy")
         if fine_xy is None:
             cx = (x0 + x1) * 0.5
@@ -230,8 +224,7 @@ def save_adaptive_targets_overlay(
             cx = float(fine_xy[0]) * width / fine_grid_size
             cy = float(fine_xy[1]) * height / fine_grid_size
         r = max(3, min(width, height) / fine_grid_size * 0.12)
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
-        draw.text((cx + r + 1, cy - r - 1), str(idx), fill=(255, 255, 0, 220))
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=target_fill)
 
     canvas.save(output_path)
 

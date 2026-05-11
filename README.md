@@ -433,3 +433,9 @@ If you find this work useful, please consider citing:
 ## License
 
 This project is licensed under the terms of the [Apache 2 License](LICENSE).
+
+## VGGT
+
+```bash
+python vggt_images_to_ply.py --image_dir data/datasets_JAX/JAX_068/images --output outputs/JAX_068_vggt.ply --model_dir /root/autodl-tmp/huggingface/hub/models--facebook--VGGT-1B --source point --conf_percentile 50 --max_points 1500000 --format gaussian --axis_transform swap_xy_neg_z --align_reference_ply data/datasets_JAX/JAX_068/points3D.ply
+```
